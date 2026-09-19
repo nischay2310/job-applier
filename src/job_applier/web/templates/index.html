@@ -425,6 +425,17 @@
                 ></span>
               </button>
 
+              <!-- Batch Auto-Apply: LinkedIn Easy Apply jobs only -->
+              <button
+                @click="triggerBatchApply(true)"
+                :disabled="applications.length === 0 || isBatchRunning"
+                class="px-4 py-2 bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 text-white rounded-xl text-sm font-medium transition shadow-lg shadow-sky-950/40 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Apply to the next 5 jobs confirmed as LinkedIn Easy Apply, skipping external applications"
+              >
+                <i data-lucide="send" class="w-4 h-4"></i>
+                <span>Easy Apply Next 5</span>
+              </button>
+
               <!-- Cleanup Button -->
               <button
                 type="button"
@@ -435,6 +446,18 @@
               >
                 <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                 <span>Clean Old</span>
+              </button>
+
+              <!-- Clear entire queue -->
+              <button
+                type="button"
+                @click="clearWholeQueue()"
+                :disabled="applications.length === 0 || isBatchRunning || automationStatus.is_active"
+                class="px-3 py-2 bg-rose-600/90 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Remove every job from the queue at once (backed up first; tracker history kept)"
+              >
+                <i data-lucide="trash" class="w-3.5 h-3.5"></i>
+                <span>Clear Queue</span>
               </button>
 
               <!-- Clear Failed Button -->
@@ -790,6 +813,22 @@
                 <span>Clear Failed History</span>
               </button>
 
+              <label
+                class="flex items-center space-x-2 px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-slate-300 cursor-pointer hover:border-slate-700 transition"
+                title="Only show LinkedIn Easy Apply jobs (same switch as on the Queue page)"
+              >
+                <input
+                  type="checkbox"
+                  x-model="easyApplyOnlyFilter"
+                  @change="loadApplications()"
+                  class="rounded text-sky-400 bg-slate-950 border-slate-700 focus:ring-0"
+                />
+                <span class="text-sky-300 font-medium flex items-center gap-1"
+                  ><i data-lucide="zap" class="w-3.5 h-3.5"></i> Easy Apply
+                  Only</span
+                >
+              </label>
+
               <select
                 x-model="trackerStatusFilter"
                 @change="loadTrackerData()"
@@ -797,6 +836,7 @@
               >
                 <option value="">All Statuses</option>
                 <option value="applied">Applied</option>
+                <option value="needs_review">Needs Review</option>
                 <option value="auto_filled">Auto-filled</option>
                 <option value="interviewing">Interviewing</option>
                 <option value="skipped">Skipped</option>
@@ -937,7 +977,7 @@
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-800/60">
-                  <template x-for="(record, idx) in trackerRecords" :key="idx">
+                  <template x-for="(record, idx) in visibleTrackerRecords" :key="idx">
                     <tr class="hover:bg-slate-800/40 transition">
                       <td
                         class="py-3 px-4 font-mono text-slate-400 text-[11px]"
@@ -1046,7 +1086,7 @@
                       </td>
                     </tr>
                   </template>
-                  <tr x-show="trackerRecords.length === 0">
+                  <tr x-show="visibleTrackerRecords.length === 0">
                     <td colspan="7" class="py-12 text-center text-slate-500">
                       No applications recorded in tracker yet.
                     </td>
@@ -2318,6 +2358,10 @@
           applications: [],
           trackerRecords: [],
           trackerStatusFilter: "",
+          get visibleTrackerRecords() {
+            if (!this.easyApplyOnlyFilter) return this.trackerRecords;
+            return this.trackerRecords.filter((r) => r.easy_apply === "true");
+          },
           stats: { pending: 0, tracker: {} },
           pipelineStatus: { is_running: false, logs: [] },
           pipelineForm: {
@@ -2603,22 +2647,27 @@
             }
           },
 
-          async triggerBatchApply() {
+          async triggerBatchApply(easyApplyOnly = false) {
             this.isBatchRunning = true;
-            this.showToast(
-              "Starting sequential batch auto-apply for next 5 jobs...",
-              "info",
-            );
+            const label = easyApplyOnly ? "next 5 Easy Apply jobs" : "next 5 jobs";
+            this.showToast(`Starting batch auto-apply for ${label}...`, "info");
             try {
               const res = await fetch("/api/batch-apply", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ count: 5, mode: "assisted" }),
+                body: JSON.stringify({
+                  count: 5,
+                  mode: "assisted",
+                  easy_apply_only: easyApplyOnly,
+                }),
               });
+              const data = await res.json().catch(() => ({}));
               if (res.ok) {
                 this.showToast(
-                  "Batch auto-apply running in background! Applications will move to applied.",
+                  `Applying to ${data.count || 5} jobs in the background - watch live for progress.`,
                 );
+              } else {
+                this.showToast(data.detail || "Could not start the batch", "error");
               }
             } catch (e) {
               this.showToast("Error starting batch: " + e, "error");
@@ -2814,6 +2863,32 @@
               }
             } catch (e) {
               this.showToast("Error during cleanup: " + e, "error");
+            }
+          },
+
+          async clearWholeQueue() {
+            const n = this.stats.pending || this.applications.length;
+            if (
+              !confirm(
+                `Remove all ${n} jobs from the queue?\n\nA backup is saved to output/backups first. Your tracker history is kept.`,
+              )
+            )
+              return;
+            try {
+              const res = await fetch("/api/applications/cleanup", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ older_than_days: 0, archive: true }),
+              });
+              const data = await res.json();
+              if (res.ok) {
+                this.showToast(`Queue cleared - removed ${data.removed_count} jobs.`);
+                await this.loadDashboardData();
+              } else {
+                this.showToast(data.detail || "Could not clear the queue", "error");
+              }
+            } catch (e) {
+              this.showToast("Error clearing queue: " + e, "error");
             }
           },
 

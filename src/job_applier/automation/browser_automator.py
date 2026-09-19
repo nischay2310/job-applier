@@ -242,6 +242,7 @@ class BrowserAutomator:
 
         self.use_host_chrome = USE_HOST_CHROME
         self.using_host_chrome = False
+        self.last_apply_kind: str | None = None
 
         self.playwright: Any = None
         self.browser: Any = None
@@ -467,6 +468,7 @@ class BrowserAutomator:
         """
         if not self.page:
             self.start()
+        self.last_apply_kind = None
 
         if is_excluded_application_url(job_url):
             self._notify(
@@ -490,6 +492,10 @@ class BrowserAutomator:
 
         # Dismiss modal overlays and cookie consent banners
         self._dismiss_overlays()
+
+        # Read the apply button before clicking it: the search-time Easy Apply
+        # filter is only a hint, this is the real answer for this posting.
+        self.last_apply_kind = self._linkedin_apply_kind()
 
         # Check if page indicates the job is closed or expired
         try:
@@ -591,6 +597,39 @@ class BrowserAutomator:
                     continue
 
         return True
+
+    def _linkedin_apply_kind(self) -> str | None:
+        """'easy' when the posting shows LinkedIn's Easy Apply button,
+        'external' when its Apply button goes to the company's own site, None
+        when this isn't a LinkedIn job page or no apply button is visible."""
+        if self.detect_platform(self.page.url) != "LinkedIn":
+            return None
+        checks = (
+            ("easy", "button.jobs-apply-button[aria-label*='Easy Apply'], button:has-text('Easy Apply')"),
+            ("external", "button.jobs-apply-button, a.jobs-apply-button, [aria-label*='company website']"),
+        )
+        for kind, sel in checks:
+            try:
+                buttons = self.page.locator(sel)
+                for i in range(min(buttons.count(), 5)):
+                    if buttons.nth(i).is_visible(timeout=500):
+                        return kind
+            except Exception:
+                continue
+        return None
+
+    def _record_apply_kind(self, app_dir: Path) -> None:
+        """Corrects the job's Easy Apply marker with what the page showed, so
+        the dashboard's Easy Apply filter reflects each real posting."""
+        kind = getattr(self, "last_apply_kind", None)
+        if kind is None:
+            return
+        try:
+            (app_dir / "EASY_APPLY.txt").write_text(
+                "true" if kind == "easy" else "false", encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     def _form_root(self) -> Any:
         """Returns the Easy Apply modal/dialog as the scope for form-filling
@@ -1837,6 +1876,7 @@ class BrowserAutomator:
         """
         print(f"\n🚀 Starting Assisted Auto-Apply for {company} - {job_title}")
         success = self.navigate_and_open_form(job_url)
+        self._record_apply_kind(app_dir)
         if not success:
             return "failed", "Could not navigate to job URL"
 
@@ -2006,6 +2046,7 @@ class BrowserAutomator:
         """
         print(f"\n⚡ Starting Autonomous Auto-Apply for {company} - {job_title}")
         success = self.navigate_and_open_form(job_url)
+        self._record_apply_kind(app_dir)
         if not success:
             return "failed", "Could not navigate to job URL"
 

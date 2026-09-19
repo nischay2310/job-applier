@@ -217,6 +217,7 @@ class BatchApplyRequest(BaseModel):
     count: int = 5
     mode: str = "assisted"
     headless: bool = True
+    easy_apply_only: bool = False
 
 
 class QuestionAnswerRequest(BaseModel):
@@ -842,6 +843,21 @@ def cleanup_applications(body: CleanupRequest) -> dict[str, Any]:
     if not output_apps_dir.exists():
         return {"status": "success", "removed_count": 0, "remaining_count": 0}
 
+    # Clearing everything mid-batch would pull folders out from under the
+    # browser that's filling them.
+    if body.older_than_days <= 0 and (
+        AUTOMATION_STATE.get("is_active") or _browser_slot_queue.qsize() < MAX_CONCURRENT_APPLIES
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="An application is being submitted right now - wait for it to finish, then clear the queue.",
+        )
+    if body.older_than_days <= 0 and PIPELINE_STATE.get("is_running"):
+        raise HTTPException(
+            status_code=409,
+            detail="A scrape is still adding jobs to the queue - wait for it to finish, then clear.",
+        )
+
     now = time.time()
     cutoff_seconds = body.older_than_days * 86400
 
@@ -856,8 +872,9 @@ def cleanup_applications(body: CleanupRequest) -> dict[str, Any]:
     # If archive requested and deleting files, create backup archive
     if body.archive and folders_to_delete:
         try:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             shutil.make_archive(
-                base_name=str(project_root / "output" / "archive_applications_backup"),
+                base_name=str(project_root / "output" / "backups" / f"queue_{stamp}"),
                 format="gztar",
                 root_dir=str(output_apps_dir),
             )
@@ -1331,13 +1348,17 @@ def batch_apply(
             if (output_apps_dir / aid).exists()
         ]
     else:
-        folders = sorted([d for d in output_apps_dir.iterdir() if d.is_dir()])[
-            : body.count
-        ]
+        candidates = sorted(d for d in output_apps_dir.iterdir() if d.is_dir())
+        if body.easy_apply_only:
+            candidates = [d for d in candidates if _read_easy_apply_flag(d) == "true"]
+        folders = candidates[: body.count]
 
     if not folders:
         raise HTTPException(
-            status_code=400, detail="No valid applications found for batch"
+            status_code=400,
+            detail="No Easy Apply jobs left in the queue"
+            if body.easy_apply_only
+            else "No valid applications found for batch",
         )
 
     if _browser_slot_queue.empty():
