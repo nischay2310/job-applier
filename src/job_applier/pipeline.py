@@ -31,8 +31,10 @@ from job_applier.scrapers.activity_checker import (  # type: ignore[import-not-f
     is_job_active,
 )
 from job_applier.scrapers.job_filters import (  # type: ignore[import-not-found]
+    MAX_JOB_AGE_DAYS,
     exceeds_experience_cap,
     is_excluded_application_url,
+    is_older_than,
 )
 from job_applier.scrapers.job_scraper import fetch_jobs
 from job_applier.scrapers.region_config import (  # type: ignore[import-not-found]
@@ -147,6 +149,13 @@ def run_application_pipeline(
                 )
                 continue
 
+            run_stats = {
+                "queued": 0,
+                "already queued/applied": 0,
+                "older than 3 days": 0,
+                "over 7 yrs experience": 0,
+                "expired/closed": 0,
+            }
             for index, row in df.iterrows():
                 company = sanitize_name(str(row.get("company", "Unknown_Company")))
                 job_title = sanitize_name(str(row.get("title", "Position")))
@@ -157,8 +166,14 @@ def run_application_pipeline(
                 if not job_url_raw or job_url_raw == "URL not found":
                     continue
 
-                # Skip if already processed
+                # Skip if already handled this run, or rejected as expired before
                 if job_url_raw in processed_urls:
+                    run_stats["already queued/applied"] += 1
+                    continue
+
+                if is_older_than(row.get("date_posted"), MAX_JOB_AGE_DAYS):
+                    run_stats["older than 3 days"] += 1
+                    processed_urls.add(job_url_raw)
                     continue
 
                 over_cap, cap_reason = exceeds_experience_cap(
@@ -170,6 +185,7 @@ def run_application_pipeline(
                         level="INFO",
                         category="Pipeline",
                     )
+                    run_stats["over 7 yrs experience"] += 1
                     processed_urls.add(job_url_raw)
                     continue
 
@@ -204,6 +220,7 @@ def run_application_pipeline(
                         level="INFO",
                         category="Pipeline",
                     )
+                    run_stats["already queued/applied"] += 1
                     processed_urls.add(job_url_raw)
                     continue
 
@@ -228,6 +245,7 @@ def run_application_pipeline(
                         level="WARN",
                         category="Pipeline",
                     )
+                    run_stats["expired/closed"] += 1
                     processed_urls.add(job_url_raw)
                     try:
                         with open(processed_jobs_file, "a", encoding="utf-8") as f:
@@ -334,17 +352,11 @@ def run_application_pipeline(
                 if sig:
                     existing_roles[sig] = app_id
 
-                # Mark as processed in text tracking file
-                try:
-                    with open(processed_jobs_file, "a", encoding="utf-8") as f:
-                        f.write(f"{job_url}\n")
-                    processed_urls.add(job_url)
-                except Exception as e:
-                    log_event(
-                        f"Could not record to processed_jobs.txt: {e}",
-                        level="WARN",
-                        category="Pipeline",
-                    )
+                # Remembered for this run only. Across runs the queue and
+                # applied folders are the record: persisting queued jobs here
+                # meant a cleared queue could never be refilled by a re-scrape.
+                processed_urls.add(job_url)
+                run_stats["queued"] += 1
 
                 # 4. If --auto-apply is active, immediately run browser automation!
                 if automator is not None:
@@ -381,6 +393,16 @@ def run_application_pipeline(
 
                 # Avoid hitting rate limits
                 time.sleep(2)
+
+            skipped = ", ".join(
+                f"{n} {why}" for why, n in run_stats.items() if why != "queued" and n
+            )
+            log_event(
+                f"'{term}': {len(df)} found, {run_stats['queued']} new jobs queued"
+                + (f" (skipped: {skipped})" if skipped else ""),
+                level="SUCCESS" if run_stats["queued"] else "INFO",
+                category="Pipeline",
+            )
     finally:
         if automator is not None:
             automator.close()

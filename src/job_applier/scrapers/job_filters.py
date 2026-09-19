@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 
 # Platforms to skip entirely - their application flows aren't supported.
 EXCLUDED_URL_MARKERS = ("workday", "myworkdayjobs")
@@ -21,6 +22,25 @@ _YEARS_PATTERNS = (
     # "8 years of experience"
     r"(\d{1,2})\s*(?:years|yrs)\s*(?:of\s*)?(?:relevant\s*|total\s*|overall\s*)?experience",
 )
+
+
+MAX_JOB_AGE_DAYS = 3
+
+
+def is_older_than(date_posted: object, max_days: int = MAX_JOB_AGE_DAYS) -> bool:
+    """True when a scraped posting date is more than max_days old.
+
+    The LinkedIn search is already limited to the last 72 hours; this backs
+    it up for postings whose date comes through. A missing date isn't treated
+    as old - the search filter already applied to it.
+    """
+    if date_posted is None:
+        return False
+    try:
+        posted = date.fromisoformat(str(date_posted).strip()[:10])
+    except ValueError:
+        return False
+    return (date.today() - posted).days > max_days
 
 
 def is_excluded_application_url(url: str) -> bool:
