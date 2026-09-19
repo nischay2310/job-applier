@@ -190,6 +190,6 @@ class ResumeParseApplyHandler:
 
         self.fill_remaining(report, job_title, company)
         self.automator._answer_radio_groups(report, job_title, company)
-        self.automator._fill_select_inputs(report)
+        self.automator._fill_select_inputs(report, job_title, company)
         self.automator._check_consent_boxes()
         return report

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import socket
 import sys
+import threading
 import time
 import urllib.request
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +28,7 @@ from job_applier.automation.cloudflare import (  # type: ignore[import-not-found
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     record_pending,
 )
+from job_applier.chrome_launcher import cdp_ready, ensure_chrome
 from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
     QuestionSolver,
 )
@@ -38,9 +43,12 @@ from job_applier.tracker import record_application  # type: ignore[import-not-fo
 from job_applier.utils import get_project_root
 
 
+IN_DOCKER = os.path.exists("/.dockerenv")
+
+# "Select an option", "-- Choose --" and friends aren't real answers.
+PLACEHOLDER_OPTION = re.compile(r"^\s*(select|choose|please select|pick|-{2,}|—)", re.I)
 HOST_CHROME_HOSTNAME = os.environ.get(
-    "HOST_CHROME_HOSTNAME",
-    "host.docker.internal" if os.path.exists("/.dockerenv") else "127.0.0.1",
+    "HOST_CHROME_HOSTNAME", "host.docker.internal" if IN_DOCKER else "127.0.0.1"
 )
 HOST_CHROME_CDP_PORT = os.environ.get("HOST_CHROME_CDP_PORT", "9222")
 USE_HOST_CHROME = os.environ.get("USE_HOST_CHROME", "1") not in ("0", "false", "False")
@@ -193,10 +201,18 @@ def verify_linkedin_session(context: Any | None = None) -> tuple[bool, str]:
 
 ACTIVE_AUTOMATOR: BrowserAutomator | None = None
 
+# Every automation that's running right now, for the dashboard's live view.
+AGENTS: dict[str, dict[str, Any]] = {}
+AGENTS_LOCK = threading.Lock()
+
 
 def get_active_automator() -> BrowserAutomator | None:
     """Returns the currently active BrowserAutomator instance, if any."""
     return ACTIVE_AUTOMATOR
+
+
+def agent_frame_path(agent_id: str) -> Path:
+    return get_project_root() / "data" / "live" / f"{agent_id}.png"
 
 
 class BrowserAutomator:
@@ -243,6 +259,8 @@ class BrowserAutomator:
         self.use_host_chrome = USE_HOST_CHROME
         self.using_host_chrome = False
         self.last_apply_kind: str | None = None
+        self.agent_id = uuid.uuid4().hex[:8]
+        self.target_id: str | None = None
 
         self.playwright: Any = None
         self.browser: Any = None
@@ -261,15 +279,27 @@ class BrowserAutomator:
         log_event(message, level=level, category="Auto-Apply")
         if self.page is not None:
             try:
-                live_path = get_project_root() / "data" / "live_view.png"
-                self.page.screenshot(path=str(live_path))
+                frame = agent_frame_path(self.agent_id)
+                frame.parent.mkdir(parents=True, exist_ok=True)
+                self.page.screenshot(path=str(frame))
+                shutil.copyfile(frame, get_project_root() / "data" / "live_view.png")
             except Exception:
                 pass
+        self._update_agent(step=step, message=message, level=level)
         if self.status_callback:
             try:
                 self.status_callback(step, message, level, details or {})
             except Exception as cb_err:
                 print(f"Notice in status callback: {cb_err}")
+
+    def _update_agent(self, **fields: Any) -> None:
+        now = time.strftime("%H:%M:%S")
+        with AGENTS_LOCK:
+            agent = AGENTS.setdefault(
+                self.agent_id,
+                {"id": self.agent_id, "started_at": now, "step": "starting", "message": ""},
+            )
+            agent.update(fields, target_id=self.target_id, updated_at=now)
 
     def _inject_plaintext_cookies(self) -> None:
         """Loads cookies from data/linkedin_cookies.json (plaintext, extracted
@@ -310,7 +340,7 @@ class BrowserAutomator:
                 host_chrome_ws_endpoint()
             )
             self.context = self.browser.contexts[0]
-            self.page = self.context.new_page()
+            self.page = self._open_agent_window()
             self.using_host_chrome = True
             print(f"Attached to automation Chrome over CDP ({HOST_CHROME_HOSTNAME}:{HOST_CHROME_CDP_PORT})")
             return True
@@ -320,6 +350,26 @@ class BrowserAutomator:
             self.context = None
             self.page = None
             return False
+
+    def _open_agent_window(self) -> Any:
+        """Each agent works in its own Chrome window so runs can be watched
+        side by side instead of fighting over the tab you're looking at."""
+        try:
+            cdp = self.browser.new_browser_cdp_session()
+            with self.context.expect_page(timeout=5000) as new_page:
+                target = cdp.send(
+                    "Target.createTarget", {"url": "about:blank", "newWindow": True}
+                )
+            self.target_id = target["targetId"]
+            return new_page.value
+        except Exception:
+            page = self.context.new_page()
+            try:
+                info = self.context.new_cdp_session(page).send("Target.getTargetInfo")
+                self.target_id = info["targetInfo"]["targetId"]
+            except Exception:
+                pass
+            return page
 
     def start(self) -> None:
         """Starts Playwright and launches the browser with automatic fallbacks."""
@@ -335,10 +385,22 @@ class BrowserAutomator:
             global ACTIVE_AUTOMATOR
             ACTIVE_AUTOMATOR = self
 
-            if self.use_host_chrome and self._connect_host_chrome():
-                self.page.set_default_navigation_timeout(30000)
-                self.page.set_default_timeout(10000)
-                return
+            if self.use_host_chrome:
+                # Chrome loses remote control whenever it's reopened normally;
+                # running natively we can put it back instead of failing.
+                if not IN_DOCKER and not cdp_ready():
+                    ok, msg = ensure_chrome()
+                    log_event(msg, level="INFO" if ok else "ERROR", category="Auto-Apply")
+                if self._connect_host_chrome():
+                    self.page.set_default_navigation_timeout(30000)
+                    self.page.set_default_timeout(10000)
+                    self._update_agent(step="starting", message="Opened its Chrome window")
+                    return
+                if not IN_DOCKER:
+                    raise RuntimeError(
+                        "Couldn't take control of Chrome - use 'Reconnect Chrome' on the "
+                        "dashboard or rerun start.py"
+                    )
 
             # Prefer installed Google Chrome
             chrome_path = "/usr/bin/google-chrome"
@@ -435,6 +497,9 @@ class BrowserAutomator:
         except Exception:
             pass
         finally:
+            with AGENTS_LOCK:
+                AGENTS.pop(self.agent_id, None)
+            agent_frame_path(self.agent_id).unlink(missing_ok=True)
             self.context = None
             self.browser = None
             self.playwright = None
@@ -858,7 +923,7 @@ class BrowserAutomator:
         self._fill_combobox_inputs(report, job_title, company)
 
         # 6. Fill dropdowns / select elements
-        self._fill_select_inputs(report)
+        self._fill_select_inputs(report, job_title, company)
 
         # 5. If 0 fields filled, check if an unclicked Apply button is present
         if len(report["fields_filled"]) == 0:
@@ -888,7 +953,7 @@ class BrowserAutomator:
                             candidate.click()
                             time.sleep(3)
                             self._fill_standard_inputs(report, cover_letter_text)
-                            self._fill_select_inputs(report)
+                            self._fill_select_inputs(report, job_title, company)
                             if not report["resume_uploaded"] and cv_pdf and cv_pdf.exists():
                                 report["resume_uploaded"] = self._upload_resume(
                                     str(cv_pdf.resolve())
@@ -1086,39 +1151,49 @@ class BrowserAutomator:
             except Exception:
                 continue
 
-    def _fill_select_inputs(self, report: dict[str, Any]) -> None:
-        """Selects options for dropdown fields like Country, Authorization, Sponsorship."""
+    def _fill_select_inputs(
+        self, report: dict[str, Any], job_title: str = "", company: str = ""
+    ) -> None:
+        """Answers dropdown questions like any other question: a known answer
+        is selected, an unknown one goes to the Tracker instead of a guess."""
         selects = self._form_root().locator("select")
-        count = selects.count()
-
-        for i in range(count):
+        for i in range(selects.count()):
             try:
                 el = selects.nth(i)
                 if not el.is_visible():
                     continue
 
-                desc = self._get_element_descriptor(el)
-                options = el.locator("option").all_inner_texts()
+                options = [o.strip() for o in el.locator("option").all_inner_texts()]
+                choices = [o for o in options if o and not PLACEHOLDER_OPTION.match(o)]
+                if not choices:
+                    continue
+                selected = el.evaluate(
+                    "s => s.selectedIndex >= 0 ? s.options[s.selectedIndex].text.trim() : ''"
+                )
+                if selected in choices:
+                    continue  # already answered (LinkedIn prefills some)
 
-                matched_val = None
-                if "country" in desc:
-                    matched_val = self.question_solver._match_to_options(
-                        self.profile.country, options
-                    )
-                elif any(w in desc for w in ["authorized", "eligib", "right to work"]):
-                    matched_val = self.question_solver._match_to_options("Yes", options)
-                elif any(w in desc for w in ["sponsorship", "visa"]):
-                    matched_val = self.question_solver._match_to_options("No", options)
-                elif "gender" in desc:
-                    matched_val = self.question_solver._match_to_options(
-                        self.profile.gender, options
-                    )
-
-                if matched_val:
-                    el.select_option(label=matched_val)
+                question = self._get_question_label(el) or self._get_element_descriptor(el)
+                answer = self.question_solver.answer_question(
+                    question, options=choices, job_title=job_title, company=company
+                )
+                if answer in choices:
+                    el.select_option(label=answer)
                     self._highlight_element(el)
-                    report["fields_filled"].append(f"Dropdown: {matched_val}")
-
+                    report["fields_filled"].append(f"Dropdown: {question[:30]}")
+                    report["questions_answered"].append(
+                        {"question": question[:50], "answer": answer}
+                    )
+                else:
+                    record_pending(
+                        question,
+                        options=choices,
+                        company=company,
+                        job_title=job_title,
+                        required=self._is_required(el),
+                    )
+                    report.setdefault("needs_review", []).append(question[:120])
+                    self._highlight_element(el, color="#ff9800")
             except Exception:
                 continue
 
@@ -1875,6 +1950,7 @@ class BrowserAutomator:
         4. User can confirm submit with [Enter] or submit manually in Chrome.
         """
         print(f"\n🚀 Starting Assisted Auto-Apply for {company} - {job_title}")
+        self._update_agent(company=company, title=job_title, app_id=app_dir.name)
         success = self.navigate_and_open_form(job_url)
         self._record_apply_kind(app_dir)
         if not success:
@@ -2045,6 +2121,7 @@ class BrowserAutomator:
         Completely automated: Navigates -> Fills form -> Attaches CV -> Submits -> Records proof.
         """
         print(f"\n⚡ Starting Autonomous Auto-Apply for {company} - {job_title}")
+        self._update_agent(company=company, title=job_title, app_id=app_dir.name)
         success = self.navigate_and_open_form(job_url)
         self._record_apply_kind(app_dir)
         if not success:

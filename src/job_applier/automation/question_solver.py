@@ -103,24 +103,35 @@ class QuestionSolver:
         # Notice period / availability
         if any(
             w in cleaned_q
-            for w in ["notice period", "how soon", "when can you start", "availability"]
+            for w in ["notice", "how soon", "when can you start", "when can you join", "earliest joining", "availability"]
         ):
             return self._match_to_options(
                 self.profile.notice_period, options, default="1 month"
             )
 
-        # Desired salary / compensation
+        # Salary: current vs expected, and monthly vs annual CTC are different
+        # numbers - answering all of them with one figure was wrong.
         if any(
             w in cleaned_q
-            for w in ["salary", "compensation", "remuneration", "pay rate"]
+            for w in ["salary", "compensation", "remuneration", "pay rate", "ctc", "package"]
         ):
-            return self._match_to_options(
-                self.profile.salary_expectation, options, default="Negotiable"
+            current = any(w in cleaned_q for w in ["current", "present", "existing", "last drawn"])
+            monthly = "month" in cleaned_q
+            key = ("current" if current else "expected") + (
+                " monthly salary" if monthly else " ctc"
             )
+            answer = get_answer(key)
+            if not answer and not current and not monthly:
+                answer = self.profile.salary_expectation
+            if answer:
+                return self._match_to_options(answer, options)
 
         # Referral / How did you hear
         if any(w in cleaned_q for w in ["how did you hear", "source", "hear about us"]):
             return self._match_to_options("LinkedIn", options, default="LinkedIn")
+
+        if "country" in cleaned_q and self.profile.country:
+            return self._match_to_options(self.profile.country, options)
 
         # Gender / EEO
         if "gender" in cleaned_q:
@@ -144,11 +155,9 @@ class QuestionSolver:
                 default="No, I do not have a disability",
             )
 
-        # Years of experience general
-        if (
-            "years of experience" in cleaned_q
-            or "years of relevant experience" in cleaned_q
-        ):
+        # Years of experience with anything ("years of professional DevOps
+        # experience", "experience with Python (years)") - same answer for any stack.
+        if re.search(r"\byears?\b.*\bexperience\b|\bexperience\b.*\byears?\b", cleaned_q):
             return self._match_to_options(
                 self.profile.years_of_experience,
                 options,
@@ -261,6 +270,11 @@ class QuestionSolver:
             if opt.strip().lower() == target_lower:
                 return opt
 
+        # Numbers only match exactly or by range - as a substring "4" would
+        # hit "14+ years".
+        if re.fullmatch(r"\s*\d+(?:\.\d+)?\s*(?:\+|years?|yrs?)?\s*", target, re.I):
+            return self._match_number_to_range(target, options)
+
         # Substring match
         for opt in options:
             opt_lower = opt.strip().lower()
@@ -285,7 +299,42 @@ class QuestionSolver:
                 ):
                     return opt
 
-        return default or options[0]
+        # A number against ranges: "4" -> "3-5 years", "8" -> "7+ years"
+        ranged = self._match_number_to_range(target, options)
+        if ranged:
+            return ranged
+
+        # No match means we don't know - never fall back to whatever option
+        # happens to be first, that's a silent guess in the application.
+        for opt in options:
+            if default and opt.strip().lower() == default.lower():
+                return opt
+        return ""
+
+    @staticmethod
+    def _match_number_to_range(target: str, options: list[str]) -> str:
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:\+|years?|yrs?)?\s*", target, re.I)
+        if not match:
+            return ""
+        value = float(match.group(1))
+        if value == 0:
+            for opt in options:
+                if "immediate" in opt.lower():
+                    return opt
+        for opt in options:
+            text = opt.lower()
+            span = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)", text)
+            if span and float(span.group(1)) <= value <= float(span.group(2)):
+                return opt
+            floor = re.search(r"(\d+(?:\.\d+)?)\s*\+|(?:more than|over|above)\s*(\d+(?:\.\d+)?)", text)
+            if floor:
+                low = float(floor.group(1) or floor.group(2))
+                if value >= low:
+                    return opt
+            ceiling = re.search(r"(?:less than|under|below|up to)\s*(\d+(?:\.\d+)?)", text)
+            if ceiling and value < float(ceiling.group(1)):
+                return opt
+        return ""
 
     def _answer_with_ai(
         self,

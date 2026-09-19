@@ -63,3 +63,7 @@ htmlcov/
 data/*.pdf
 data/*.png
 data/backups/
+
+# Automation Chrome profile (LinkedIn session cookies) and live screenshots
+.chrome-profile/
+data/live/

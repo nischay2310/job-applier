@@ -2063,45 +2063,98 @@
             </div>
             <div>
               <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                Live Browser Agent View
+                Live Agents
                 <span
                   class="w-2 h-2 rounded-full"
-                  :class="automationStatus.is_active ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"
+                  :class="liveAgents.length ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"
                 ></span>
               </h3>
               <p
                 class="text-xs text-slate-400"
-                x-text="automationStatus.is_active ? (automationStatus.company + ' — ' + automationStatus.title + ' · ' + automationStatus.step) : 'No automation currently running — showing the last captured frame'"
+                x-text="liveAgents.length ? liveAgents.length + ' running - each in its own Chrome window' : 'No agents running right now'"
               ></p>
             </div>
           </div>
-          <button
-            @click="closeLiveView()"
-            class="text-slate-400 hover:text-white p-1 rounded-lg"
-          >
-            <i data-lucide="x" class="w-5 h-5"></i>
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              @click="reconnectChrome()"
+              :disabled="reconnectingChrome"
+              class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
+              title="Give the app control of your Chrome again if it was closed and reopened"
+            >
+              <i data-lucide="plug" class="w-3.5 h-3.5"></i>
+              <span x-text="reconnectingChrome ? 'Reconnecting...' : 'Reconnect Chrome'"></span>
+            </button>
+            <button
+              @click="closeLiveView()"
+              class="text-slate-400 hover:text-white p-1 rounded-lg"
+            >
+              <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+          </div>
         </div>
         <div class="flex-1 overflow-auto bg-slate-950 p-4">
-          <img
-            :src="liveViewSrc"
-            class="w-full rounded-xl border border-slate-800"
-            alt="Live browser agent screenshot"
-            @error="liveViewError = true"
-            @load="liveViewError = false"
-          />
-          <p
-            x-show="liveViewError"
-            class="text-center text-xs text-slate-500 py-10"
+          <div
+            x-show="liveAgents.length"
+            class="grid gap-4"
+            :class="liveAgents.length > 1 ? 'md:grid-cols-2' : ''"
           >
-            No live view captured yet — it appears as soon as the agent opens
-            a job page.
-          </p>
+            <template x-for="agent in liveAgents" :key="agent.id">
+              <div class="rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden">
+                <div class="px-4 py-2.5 flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p
+                      class="text-sm font-semibold text-white truncate"
+                      x-text="(agent.company || 'Starting...') + (agent.title ? ' - ' + agent.title : '')"
+                    ></p>
+                    <p
+                      class="text-[11px] text-slate-400 truncate"
+                      x-text="agent.message || agent.step"
+                    ></p>
+                  </div>
+                  <button
+                    @click="focusAgent(agent.id)"
+                    x-show="agent.target_id"
+                    class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-semibold whitespace-nowrap flex items-center gap-1"
+                    title="Bring this agent's Chrome window to the front"
+                  >
+                    <i data-lucide="external-link" class="w-3 h-3"></i> Show in Chrome
+                  </button>
+                </div>
+                <img
+                  x-show="agent.has_frame"
+                  :src="'/api/agents/' + agent.id + '/frame?t=' + liveTick"
+                  class="w-full border-t border-slate-800"
+                  alt="Latest screenshot from this agent"
+                />
+                <p
+                  x-show="!agent.has_frame"
+                  class="text-center text-xs text-slate-500 py-10 border-t border-slate-800"
+                >
+                  Waiting for the first page to load...
+                </p>
+              </div>
+            </template>
+          </div>
+          <div x-show="!liveAgents.length">
+            <img
+              :src="liveViewSrc"
+              x-show="!liveViewError"
+              class="w-full rounded-xl border border-slate-800 opacity-60"
+              alt="Last captured frame"
+              @error="liveViewError = true"
+              @load="liveViewError = false"
+            />
+            <p class="text-center text-xs text-slate-500 py-6">
+              Agents appear here as soon as an apply starts.
+              <span x-show="!liveViewError">Above is the last frame captured.</span>
+            </p>
+          </div>
         </div>
         <div
           class="px-6 py-2.5 border-t border-slate-800 text-[11px] text-slate-500 font-mono"
         >
-          Auto-refreshing every second while this window is open
+          Screenshots update at every step - "Show in Chrome" is the real window, live
         </div>
       </div>
     </div>
@@ -2386,6 +2439,9 @@
           liveViewSrc: "",
           liveViewError: false,
           liveViewInterval: null,
+          liveAgents: [],
+          liveTick: 0,
+          reconnectingChrome: false,
           authModal: {
             open: false,
             platforms: {},
@@ -2564,8 +2620,42 @@
             }
           },
 
-          refreshLiveView() {
-            this.liveViewSrc = "/api/automation/live-view?t=" + Date.now();
+          async refreshLiveView() {
+            this.liveTick = Date.now();
+            try {
+              const res = await fetch("/api/agents");
+              if (res.ok) this.liveAgents = (await res.json()).agents || [];
+            } catch (e) {
+              this.liveAgents = [];
+            }
+            if (!this.liveAgents.length) {
+              this.liveViewSrc = "/api/automation/live-view?t=" + this.liveTick;
+            }
+            this.$nextTick(() => lucide.createIcons());
+          },
+
+          async focusAgent(agentId) {
+            const res = await fetch(`/api/agents/${agentId}/focus`, { method: "POST" });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              this.showToast(data.detail || "Couldn't bring that window forward", "error");
+            }
+          },
+
+          async reconnectChrome() {
+            this.reconnectingChrome = true;
+            try {
+              const res = await fetch("/api/chrome/connect", { method: "POST" });
+              const data = await res.json().catch(() => ({}));
+              this.showToast(
+                data.message || data.detail || "Done",
+                res.ok ? "success" : "error",
+              );
+            } catch (e) {
+              this.showToast("Error reconnecting Chrome: " + e, "error");
+            } finally {
+              this.reconnectingChrome = false;
+            }
           },
 
           async openApplicationModal(appId) {

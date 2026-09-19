@@ -22,9 +22,13 @@ from job_applier.automation.autofill_script import (  # type: ignore[import-not-
     save_autofill_assets,
 )
 from job_applier.automation.browser_automator import (  # type: ignore[import-not-found]
+    AGENTS,
+    AGENTS_LOCK,
     BrowserAutomator,
+    agent_frame_path,
     verify_linkedin_session,
 )
+from job_applier.chrome_launcher import activate_target, ensure_chrome
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
     load_candidate_profile,
     save_candidate_profile,
@@ -168,6 +172,24 @@ def acquire_browser_slot(timeout: float = 300) -> int | None:
 
 def release_browser_slot(slot_id: int) -> None:
     _browser_slot_queue.put(slot_id)
+
+
+# Queue folders an agent is working on right now, so two runs started close
+# together never apply to the same job.
+_claimed_apps: set[str] = set()
+_claim_lock = threading.Lock()
+
+
+def claim_apps(folders: list[Path], limit: int | None = None) -> list[Path]:
+    with _claim_lock:
+        free = [f for f in folders if f.name not in _claimed_apps][:limit]
+        _claimed_apps.update(f.name for f in free)
+    return free
+
+
+def release_app(folder: Path) -> None:
+    with _claim_lock:
+        _claimed_apps.discard(folder.name)
 
 
 def set_automation_hud(
@@ -668,6 +690,10 @@ def run_auto_apply_for_job(
             status_code=409,
             detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now — please wait.",
         )
+    if not claim_apps([app_folder]):
+        raise HTTPException(
+            status_code=409, detail="An agent is already applying to this job."
+        )
 
     set_automation_hud(
         is_active=True,
@@ -790,7 +816,13 @@ def run_auto_apply_for_job(
             automator.close()
             release_browser_slot(slot_id)
 
-    background_tasks.add_task(run_worker)
+    def run_and_release():
+        try:
+            run_worker()
+        finally:
+            release_app(app_folder)
+
+    background_tasks.add_task(run_and_release)
     return {
         "status": "started",
         "message": f"Auto-apply started for {info['company']}",
@@ -1164,6 +1196,48 @@ def get_automation_live_view() -> FileResponse:
     )
 
 
+@app.get("/api/agents")
+def list_agents() -> dict[str, Any]:
+    """Automations running right now, one per Chrome window."""
+    with AGENTS_LOCK:
+        agents = [dict(a) for a in AGENTS.values()]
+    for a in agents:
+        a["has_frame"] = agent_frame_path(a["id"]).exists()
+    return {"agents": agents}
+
+
+@app.get("/api/agents/{agent_id}/frame")
+def agent_frame(agent_id: str) -> FileResponse:
+    frame = agent_frame_path(Path(agent_id).name)
+    if not frame.exists():
+        raise HTTPException(status_code=404, detail="No frame yet")
+    return FileResponse(
+        str(frame), media_type="image/png", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.post("/api/agents/{agent_id}/focus")
+def focus_agent(agent_id: str) -> dict[str, str]:
+    """Brings the agent's own Chrome window to the front."""
+    with AGENTS_LOCK:
+        target_id = (AGENTS.get(agent_id) or {}).get("target_id")
+    if not target_id:
+        raise HTTPException(status_code=404, detail="That agent has finished")
+    if not activate_target(target_id):
+        raise HTTPException(status_code=502, detail="Chrome didn't respond")
+    return {"status": "success"}
+
+
+@app.post("/api/chrome/connect")
+def connect_chrome() -> dict[str, Any]:
+    """Opens the automation Chrome if it isn't running (your own Chrome is
+    never touched)."""
+    ok, message = ensure_chrome()
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    return {"status": "success", "message": message}
+
+
 @app.post("/api/automation/submit-code")
 def submit_verification_code(body: SubmitCodeRequest) -> dict[str, Any]:
     """Submits a 2FA or email verification code to the active browser automation session."""
@@ -1340,31 +1414,32 @@ def batch_apply(
     body: BatchApplyRequest, background_tasks: BackgroundTasks
 ) -> dict[str, Any]:
     """Launches sequential batch auto-apply."""
-    folders = []
-    if body.app_ids:
-        folders = [
-            output_apps_dir / aid
-            for aid in body.app_ids
-            if (output_apps_dir / aid).exists()
-        ]
-    else:
-        candidates = sorted(d for d in output_apps_dir.iterdir() if d.is_dir())
-        if body.easy_apply_only:
-            candidates = [d for d in candidates if _read_easy_apply_flag(d) == "true"]
-        folders = candidates[: body.count]
-
-    if not folders:
-        raise HTTPException(
-            status_code=400,
-            detail="No Easy Apply jobs left in the queue"
-            if body.easy_apply_only
-            else "No valid applications found for batch",
-        )
-
     if _browser_slot_queue.empty():
         raise HTTPException(
             status_code=409,
             detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now — please wait.",
+        )
+
+    if body.app_ids:
+        candidates = [
+            output_apps_dir / aid
+            for aid in body.app_ids
+            if (output_apps_dir / aid).exists()
+        ]
+        folders = claim_apps(candidates)
+    else:
+        candidates = sorted(d for d in output_apps_dir.iterdir() if d.is_dir())
+        if body.easy_apply_only:
+            candidates = [d for d in candidates if _read_easy_apply_flag(d) == "true"]
+        # Claimed jobs are skipped, so a second click takes the next five.
+        folders = claim_apps(candidates, body.count)
+
+    if not folders:
+        raise HTTPException(
+            status_code=400,
+            detail="No Easy Apply jobs left that aren't already being applied to"
+            if body.easy_apply_only
+            else "No jobs left that aren't already being applied to",
         )
 
     def batch_hud_callback(
@@ -1496,7 +1571,14 @@ def batch_apply(
         finally:
             release_browser_slot(slot_id)
 
-    background_tasks.add_task(run_batch)
+    def run_and_release():
+        try:
+            run_batch()
+        finally:
+            for f in folders:
+                release_app(f)
+
+    background_tasks.add_task(run_and_release)
     return {
         "status": "started",
         "message": f"Started batch application for {len(folders)} jobs in background.",
