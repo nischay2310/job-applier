@@ -4,14 +4,17 @@
     python start.py            # Windows
     python3 start.py           # Ubuntu
 
-Installs dependencies, opens the automation Chrome (log in to LinkedIn there
-once - it remembers you), starts the dashboard, and opens it in your browser.
-Ctrl+C stops the dashboard; the automation Chrome keeps running.
+Installs dependencies, makes your main Chrome (where you're already signed in
+to LinkedIn) controllable by the app, starts the dashboard, and opens it.
+If Chrome is already open without remote control, it's restarted once and
+your tabs are restored. Ctrl+C stops the dashboard; Chrome keeps running.
 
 Options:
-    --port 8000         dashboard port
-    --reload            restart the server on code edits (kills running applies)
-    --no-chrome         don't launch the automation Chrome
+    --port 8000           dashboard port
+    --reload              restart the server on code edits (kills running applies)
+    --no-chrome           don't touch Chrome
+    --separate-profile    use a separate Chrome profile instead of your main one
+                          (sign in to LinkedIn there once)
 """
 
 from __future__ import annotations
@@ -30,10 +33,17 @@ ROOT = Path(__file__).resolve().parent
 IS_WINDOWS = os.name == "nt"
 CDP_PORT = 9222
 
-# A dedicated profile rather than your everyday one: it runs alongside your
-# normal Chrome instead of fighting it for the same profile, and remote
-# debugging is refused on Chrome's default profile in recent versions.
-CHROME_PROFILE = ROOT / ".chrome-profile"
+SEPARATE_PROFILE = ROOT / ".chrome-profile"
+
+
+def main_chrome_user_data(chrome: str) -> Path:
+    """Chrome's own user-data directory - the one your everyday browsing and
+    LinkedIn login live in."""
+    if IS_WINDOWS:
+        return Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data"
+    if "chromium" in Path(chrome).name:
+        return Path.home() / ".config" / "chromium"
+    return Path.home() / ".config" / "google-chrome"
 
 
 def say(msg: str) -> None:
@@ -97,10 +107,40 @@ def find_chrome() -> str | None:
     return None
 
 
-def start_chrome() -> None:
+def chrome_running() -> bool:
+    if IS_WINDOWS:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"],
+            capture_output=True, text=True,
+        ).stdout
+        return "chrome.exe" in out.lower()
+    return subprocess.run(
+        ["pgrep", "-x", "chrome|chromium|chromium-browser"], capture_output=True
+    ).returncode == 0
+
+
+def close_chrome() -> None:
+    """Closes Chrome gracefully so it saves the open tabs for restoring,
+    then force-stops anything left over (Chrome's background mode)."""
+    if IS_WINDOWS:
+        subprocess.run(["taskkill", "/IM", "chrome.exe"], capture_output=True)
+    else:
+        subprocess.run(["pkill", "-TERM", "-x", "chrome|chromium|chromium-browser"])
+    for _ in range(30):
+        if not chrome_running():
+            return
+        time.sleep(0.5)
+    if IS_WINDOWS:
+        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
+    else:
+        subprocess.run(["pkill", "-KILL", "-x", "chrome|chromium|chromium-browser"])
+    time.sleep(2)
+
+
+def start_chrome(separate_profile: bool) -> None:
     cdp_url = f"http://127.0.0.1:{CDP_PORT}/json/version"
     if http_ok(cdp_url):
-        say(f"Automation Chrome already running on port {CDP_PORT}.")
+        say(f"Chrome is already controllable on port {CDP_PORT}.")
         return
 
     chrome = find_chrome()
@@ -110,14 +150,27 @@ def start_chrome() -> None:
     if not IS_WINDOWS and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         say("No desktop display detected - Chrome needs one so you can log in to LinkedIn.")
 
-    CHROME_PROFILE.mkdir(exist_ok=True)
+    if separate_profile:
+        SEPARATE_PROFILE.mkdir(exist_ok=True)
+        profile_args = [f"--user-data-dir={SEPARATE_PROFILE}", "https://www.linkedin.com/feed/"]
+    else:
+        # A running Chrome can't gain remote debugging - a second launch just
+        # opens a window inside it - so it has to restart with the flag.
+        if chrome_running():
+            say("Restarting your Chrome once to enable remote control (tabs will be restored)...")
+            close_chrome()
+        profile_args = [
+            f"--user-data-dir={main_chrome_user_data(chrome)}",
+            "--profile-directory=Default",
+            "--restore-last-session",
+        ]
+
     args = [
         chrome,
         f"--remote-debugging-port={CDP_PORT}",
-        f"--user-data-dir={CHROME_PROFILE}",
+        *profile_args,
         "--no-first-run",
         "--no-default-browser-check",
-        "https://www.linkedin.com/feed/",
     ]
     # Detach so Chrome (and your LinkedIn login) outlives this script.
     if IS_WINDOWS:
@@ -128,14 +181,17 @@ def start_chrome() -> None:
         subprocess.Popen(args, start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    say("Opening automation Chrome...")
+    say("Opening Chrome...")
     for _ in range(40):
         if http_ok(cdp_url):
-            say("Automation Chrome is ready. Log in to LinkedIn in that window if it asks.")
+            say("Chrome is ready and controllable.")
             return
         time.sleep(0.5)
     say(f"Chrome started but its debugging port {CDP_PORT} never answered.")
-    say("If another app uses that port, close it and run start.py again.")
+    if not separate_profile:
+        # Newer Chrome builds may refuse remote debugging on the main profile.
+        say("Your Chrome version may block remote control of the main profile.")
+        say("Run:  python start.py --separate-profile   (then sign in to LinkedIn once there)")
     sys.exit(1)
 
 
@@ -184,7 +240,9 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true",
                         help="restart on code edits (interrupts running applies)")
     parser.add_argument("--no-chrome", action="store_true",
-                        help="don't launch the automation Chrome")
+                        help="don't touch Chrome")
+    parser.add_argument("--separate-profile", action="store_true",
+                        help="use a separate Chrome profile instead of your main one")
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -192,7 +250,7 @@ def main() -> None:
     if not (ROOT / "data" / "default_resume.pdf").exists():
         say("Note: data/default_resume.pdf is missing - LinkedIn applies will use a generated CV.")
     if not args.no_chrome:
-        start_chrome()
+        start_chrome(args.separate_profile)
     run_dashboard(args.port, args.reload)
 
 
