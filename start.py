@@ -146,7 +146,9 @@ def run_dashboard(port: int, reload: bool) -> None:
         webbrowser.open(url)
         return
 
-    env = dict(os.environ, USE_HOST_CHROME="1", PYTHONUNBUFFERED="1")
+    # PYTHONUTF8: the app logs emoji, which Windows' default console
+    # encoding (cp1252) can't print, crashing the server on startup.
+    env = dict(os.environ, USE_HOST_CHROME="1", PYTHONUNBUFFERED="1", PYTHONUTF8="1")
     cmd = [
         str(venv_python()), "-m", "job_applier.cli.web_app",
         "--host", "127.0.0.1", "--port", str(port), "--no-browser",
