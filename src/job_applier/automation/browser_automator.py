@@ -38,7 +38,10 @@ from job_applier.tracker import record_application  # type: ignore[import-not-fo
 from job_applier.utils import get_project_root
 
 
-HOST_CHROME_HOSTNAME = os.environ.get("HOST_CHROME_HOSTNAME", "host.docker.internal")
+HOST_CHROME_HOSTNAME = os.environ.get(
+    "HOST_CHROME_HOSTNAME",
+    "host.docker.internal" if os.path.exists("/.dockerenv") else "127.0.0.1",
+)
 HOST_CHROME_CDP_PORT = os.environ.get("HOST_CHROME_CDP_PORT", "9222")
 USE_HOST_CHROME = os.environ.get("USE_HOST_CHROME", "1") not in ("0", "false", "False")
 
@@ -98,6 +101,24 @@ def _check_feed_page(page: Any) -> tuple[bool, str]:
     return True, "LinkedIn session verified live"
 
 
+def host_chrome_ws_endpoint() -> str:
+    """WebSocket URL of the automation Chrome's DevTools endpoint.
+
+    Chrome only accepts CDP Host headers that are localhost or a bare IP, so a
+    hostname like host.docker.internal is resolved to its IP first."""
+    host_ip = socket.gethostbyname(HOST_CHROME_HOSTNAME)
+    req = urllib.request.Request(
+        f"http://{host_ip}:{HOST_CHROME_CDP_PORT}/json/version",
+        headers={"Host": f"localhost:{HOST_CHROME_CDP_PORT}"},
+    )
+    info = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+    return (
+        info["webSocketDebuggerUrl"]
+        .replace("localhost", host_ip)
+        .replace("127.0.0.1", host_ip)
+    )
+
+
 def verify_linkedin_session(context: Any | None = None) -> tuple[bool, str]:
     """Actually loads the synced cookies in a browser and checks whether
     LinkedIn accepts them, instead of just trusting that the cookie file
@@ -120,6 +141,25 @@ def verify_linkedin_session(context: Any | None = None) -> tuple[bool, str]:
                     page.close()
                 except Exception:
                     pass
+
+    if USE_HOST_CHROME:
+        from playwright.sync_api import (  # type: ignore[import-not-found, import-untyped]
+            sync_playwright,
+        )
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(host_chrome_ws_endpoint())
+                try:
+                    return verify_linkedin_session(browser.contexts[0])
+                finally:
+                    # Detaches only - the user's Chrome keeps running.
+                    browser.close()
+        except Exception as e:
+            return False, (
+                "Automation Chrome isn't reachable - start it with start.py "
+                f"({type(e).__name__})"
+            )
 
     cookies_path = get_project_root() / "data" / "linkedin_cookies.json"
     if not cookies_path.exists():
@@ -265,22 +305,13 @@ class BrowserAutomator:
         Chrome only accepts CDP Host headers that are localhost or a bare IP,
         so host.docker.internal has to be resolved before connecting."""
         try:
-            host_ip = socket.gethostbyname(HOST_CHROME_HOSTNAME)
-            req = urllib.request.Request(
-                f"http://{host_ip}:{HOST_CHROME_CDP_PORT}/json/version",
-                headers={"Host": f"localhost:{HOST_CHROME_CDP_PORT}"},
+            self.browser = self.playwright.chromium.connect_over_cdp(
+                host_chrome_ws_endpoint()
             )
-            info = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-            ws = (
-                info["webSocketDebuggerUrl"]
-                .replace("localhost", host_ip)
-                .replace("127.0.0.1", host_ip)
-            )
-            self.browser = self.playwright.chromium.connect_over_cdp(ws)
             self.context = self.browser.contexts[0]
             self.page = self.context.new_page()
             self.using_host_chrome = True
-            print(f"Attached to desktop Chrome over CDP at {host_ip}:{HOST_CHROME_CDP_PORT}")
+            print(f"Attached to automation Chrome over CDP ({HOST_CHROME_HOSTNAME}:{HOST_CHROME_CDP_PORT})")
             return True
         except Exception as e:
             print(f"Notice: could not attach to desktop Chrome ({e}).")
@@ -569,14 +600,21 @@ class BrowserAutomator:
         the global top-nav search box), typing garbage into unrelated site
         controls instead of the actual application form.
         """
-        try:
-            dialog = self.page.locator(
-                "[role='dialog'], .jobs-easy-apply-modal"
-            ).first
-            if dialog.count() > 0 and dialog.is_visible(timeout=500):
-                return dialog
-        except Exception:
-            pass
+        # The Easy Apply modal specifically, then any other visible dialog -
+        # LinkedIn keeps unrelated hidden dialogs in the DOM, so "the first
+        # [role=dialog]" is often not the application form.
+        for sel in (
+            ".jobs-easy-apply-modal, [data-test-modal-id='easy-apply-modal']",
+            "[role='dialog']",
+        ):
+            try:
+                candidates = self.page.locator(sel)
+                for i in range(min(candidates.count(), 6)):
+                    dialog = candidates.nth(i)
+                    if dialog.is_visible(timeout=300):
+                        return dialog
+            except Exception:
+                continue
 
         # LinkedIn's Easy Apply is always a modal. If no dialog is open there
         # is no form to read, and scanning the page instead would pick up
@@ -593,7 +631,12 @@ class BrowserAutomator:
         try:
             # Remove modal scrims and sign-in containers that intercept clicks
             self.page.evaluate("""() => {
-                document.querySelectorAll('.top-level-modal-container, .modal__overlay, .contextual-sign-in-modal, [data-test-modal-id]').forEach(el => el.remove());
+                document.querySelectorAll('.top-level-modal-container, .modal__overlay, .contextual-sign-in-modal, [data-test-modal-id]').forEach(el => {
+                    // Never delete the application form itself.
+                    if (el.matches('.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"]')
+                        || el.querySelector('.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"]')) return;
+                    el.remove();
+                });
             }""")
         except Exception:
             pass
@@ -631,14 +674,17 @@ class BrowserAutomator:
         ]
         for sel in loc_selectors:
             try:
-                inp = self.page.locator(sel).first
+                inp = self._form_root().locator(sel).first
                 if inp.is_visible(timeout=500):
                     val = inp.input_value() or ""
                     if len(val.strip()) < 2:
                         inp.click()
                         inp.fill(city)
                         time.sleep(0.8)
-                        opt = self.page.locator(f"text={city}").first
+                        # Suggestions are often rendered in a floating listbox
+                        # outside the form, so look there rather than anywhere
+                        # on the page that happens to mention the city.
+                        opt = self.page.get_by_role("option", name=city).first
                         if opt.is_visible(timeout=1000):
                             opt.click()
                         else:
@@ -1314,7 +1360,7 @@ class BrowserAutomator:
         ]
         for sel in submit_selectors:
             try:
-                matches = self.page.locator(sel)
+                matches = self._form_root().locator(sel)
                 match_count = min(matches.count(), 5)
                 for i in range(match_count):
                     btn = matches.nth(i)
@@ -1340,7 +1386,7 @@ class BrowserAutomator:
         ]
         for sel in error_selectors:
             try:
-                loc = self.page.locator(sel)
+                loc = self._form_root().locator(sel)
                 count = loc.count()
                 for i in range(min(count, 5)):
                     if loc.nth(i).is_visible(timeout=200):
@@ -1722,7 +1768,9 @@ class BrowserAutomator:
             advanced = False
             for sel in next_selectors:
                 try:
-                    matches = self.page.locator(sel)
+                    # Inside the popup only - a page-wide "Next" also matches
+                    # carousel arrows and pagination on the job page itself.
+                    matches = self._form_root().locator(sel)
                     match_count = min(matches.count(), 5)
                     for i in range(match_count):
                         btn = matches.nth(i)
