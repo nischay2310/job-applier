@@ -30,6 +30,10 @@ from job_applier.resume.tailor_cv import tailor_resume
 from job_applier.scrapers.activity_checker import (  # type: ignore[import-not-found]
     is_job_active,
 )
+from job_applier.scrapers.job_filters import (  # type: ignore[import-not-found]
+    exceeds_experience_cap,
+    is_excluded_application_url,
+)
 from job_applier.scrapers.job_scraper import fetch_jobs
 from job_applier.scrapers.region_config import (  # type: ignore[import-not-found]
     RegionScope,
@@ -52,6 +56,7 @@ def run_application_pipeline(
     auto_apply: bool = False,
     autonomous: bool = False,
     headless: bool = False,
+    easy_apply_only: bool = False,
 ) -> None:
     """
     Core pipeline service that scrapes job listings, predicts active status,
@@ -126,6 +131,7 @@ def run_application_pipeline(
                 region=region,
                 countries=countries,
                 emea_only=emea_only,
+                easy_apply_only=easy_apply_only,
             )
 
             if not csv_path or not os.path.exists(csv_path):
@@ -155,11 +161,34 @@ def run_application_pipeline(
                 if job_url_raw in processed_urls:
                     continue
 
+                over_cap, cap_reason = exceeds_experience_cap(
+                    f"{job_title} {jd_text}"
+                )
+                if over_cap:
+                    log_event(
+                        f"Skipping over-experience job: {company} - {job_title} ({cap_reason})",
+                        level="INFO",
+                        category="Pipeline",
+                    )
+                    processed_urls.add(job_url_raw)
+                    continue
+
                 # Resolve the actual application form website (bypasses aggregator landing pages)
                 job_url, detected_platform = resolve_application_url(
                     job_url=job_url_raw,
                     job_url_direct=job_url_direct if job_url_direct else None,
                 )
+
+                if is_excluded_application_url(job_url) or is_excluded_application_url(
+                    job_url_raw
+                ):
+                    log_event(
+                        f"Skipping excluded platform: {company} - {job_title}",
+                        level="INFO",
+                        category="Pipeline",
+                    )
+                    processed_urls.add(job_url_raw)
+                    continue
 
                 # Deduplication check by canonical URL and (company, title) signature
                 is_dup, dup_reason = is_duplicate_application(
@@ -214,6 +243,21 @@ def run_application_pipeline(
                 app_dir = output_base / app_id
                 app_dir.mkdir(parents=True, exist_ok=True)
 
+                # Keep the posting text alongside the application - open-ended
+                # questions ("what interests you about us?") are answered from
+                # what the role actually asks for.
+                try:
+                    with open(
+                        app_dir / "job_description.txt", "w", encoding="utf-8"
+                    ) as f:
+                        f.write(jd_text)
+                except Exception as e:
+                    log_event(
+                        f"Could not write job_description.txt: {e}",
+                        level="WARN",
+                        category="Pipeline",
+                    )
+
                 # Save the application link for easy access
                 try:
                     with open(app_dir / "APPLY_HERE.txt", "w", encoding="utf-8") as f:
@@ -224,6 +268,16 @@ def run_application_pipeline(
                         level="WARN",
                         category="Pipeline",
                     )
+
+                # Tag whether this job was scraped under the Easy-Apply-only
+                # filter. jobspy doesn't expose easy-apply status per job, only
+                # as a search-time filter — so "true" is only ever written
+                # when that filter was actually on for this run.
+                try:
+                    with open(app_dir / "EASY_APPLY.txt", "w", encoding="utf-8") as f:
+                        f.write("true" if easy_apply_only else "unknown")
+                except Exception:
+                    pass
 
                 log_event(
                     f"Tailoring application for: {company} - {job_title}...",

@@ -16,4 +16,10 @@ seed_file() {
 seed_file data/candidate_profile.json
 seed_file data/master_resume.json
 
+if [ -s /opt/job-applier-defaults/linkedin_cookies.db ] && [ ! -e /app/.browser_profile/Default/Network/Cookies ]; then
+    mkdir -p /app/.browser_profile/Default/Network
+    cp /opt/job-applier-defaults/linkedin_cookies.db /app/.browser_profile/Default/Network/Cookies
+    echo "Seeded LinkedIn session cookies from host extraction."
+fi
+
 exec "$@"

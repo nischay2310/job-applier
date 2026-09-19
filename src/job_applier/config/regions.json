@@ -199,6 +199,34 @@
       "boston",
       "los angeles"
     ],
+    "INDIA": [
+      "india",
+      "bharat",
+      "bangalore",
+      "bengaluru",
+      "hyderabad",
+      "pune",
+      "gurugram",
+      "gurgaon",
+      "delhi",
+      "new delhi",
+      "delhi ncr",
+      "ncr",
+      "noida",
+      "greater noida",
+      "mumbai",
+      "chennai",
+      "kolkata",
+      "ahmedabad",
+      "kochi",
+      "cochin",
+      "coimbatore",
+      "indore",
+      "jaipur",
+      "chandigarh",
+      "thane",
+      "navi mumbai"
+    ],
     "GLOBAL": []
   },
   "country_aliases": {
@@ -369,6 +397,25 @@
     "bulgaria": [
       "bulgaria",
       "sofia"
+    ],
+    "india": [
+      "india",
+      "bharat",
+      "bangalore",
+      "bengaluru",
+      "hyderabad",
+      "pune",
+      "gurugram",
+      "gurgaon",
+      "delhi",
+      "new delhi",
+      "delhi ncr",
+      "ncr",
+      "noida",
+      "greater noida",
+      "mumbai",
+      "chennai",
+      "kolkata"
     ]
   },
   "non_emea_restrictions": [

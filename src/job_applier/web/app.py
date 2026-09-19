@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import random
 import shutil
 import threading
 import time
@@ -21,6 +23,7 @@ from job_applier.automation.autofill_script import (  # type: ignore[import-not-
 )
 from job_applier.automation.browser_automator import (  # type: ignore[import-not-found]
     BrowserAutomator,
+    verify_linkedin_session,
 )
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
     load_candidate_profile,
@@ -110,6 +113,62 @@ AUTOMATION_STATE: dict[str, Any] = {
 }
 automation_lock = threading.Lock()
 
+# Cache of the last real (live-navigation) LinkedIn session check, separate
+# from the cheap file-existence check in AuthManager.check_auth_status,
+# which reports "logged_in" whenever a cookie file merely exists - even if
+# LinkedIn itself would bounce it straight back to the login wall.
+LINKEDIN_LIVE_STATUS: dict[str, Any] = {
+    "checked": False,
+    "valid": False,
+    "message": "Not yet verified",
+    "checked_at": "",
+}
+
+# Browser automation slot pool. A single persistent Chrome profile can only
+# be opened by ONE process at a time (Chrome's own SingletonLock enforces
+# this) — trying to run more than one automation against it concurrently is
+# what caused "Target page, context or browser has been closed" crashes and
+# hung requests. Each slot gets its own isolated, cookie-seeded profile
+# directory so up to MAX_CONCURRENT_APPLIES jobs can genuinely run in
+# parallel without colliding. Keep this at 3 until parallel runs have proven
+# reliable, then it's safe to raise.
+MAX_CONCURRENT_APPLIES = 3
+_browser_slot_queue: "queue.Queue[int]" = queue.Queue()
+for _slot_id in range(MAX_CONCURRENT_APPLIES):
+    _browser_slot_queue.put(_slot_id)
+
+
+def get_slot_profile_dir(slot_id: int) -> Path:
+    return project_root / ".browser_profile_pool" / f"slot-{slot_id}"
+
+
+def ensure_slot_seeded(slot_id: int) -> Path:
+    """Makes sure a pool slot's profile dir exists and carries the same
+    LinkedIn session cookies as the master profile, so every slot logs in
+    the same as the main browser profile does."""
+    slot_dir = get_slot_profile_dir(slot_id)
+    master_cookies = project_root / ".browser_profile" / "Default" / "Network" / "Cookies"
+    slot_cookies = slot_dir / "Default" / "Network"
+    slot_cookies.mkdir(parents=True, exist_ok=True)
+    dest = slot_cookies / "Cookies"
+    if master_cookies.exists() and not dest.exists():
+        shutil.copy2(master_cookies, dest)
+    return slot_dir
+
+
+def acquire_browser_slot(timeout: float = 300) -> int | None:
+    """Blocks until a browser slot is free (up to `timeout` seconds), then
+    reserves it. Returns None on timeout — caller should treat that as
+    'too busy, try again later' rather than hanging forever."""
+    try:
+        return _browser_slot_queue.get(timeout=timeout)
+    except queue.Empty:
+        return None
+
+
+def release_browser_slot(slot_id: int) -> None:
+    _browser_slot_queue.put(slot_id)
+
 
 def set_automation_hud(
     is_active: bool = True,
@@ -147,14 +206,22 @@ def set_automation_hud(
 # Pydantic models for request bodies
 class ApplyRequest(BaseModel):
     mode: str = "assisted"  # 'assisted' or 'autonomous'
-    headless: bool | None = None
+    # Defaults to headless: the virtual-display (Xvfb) path is unreliable
+    # across repeated requests in this container (stale $DISPLAY state), and
+    # headless Chrome completes Easy Apply submissions reliably on its own.
+    headless: bool = True
 
 
 class BatchApplyRequest(BaseModel):
     app_ids: list[str] | None = None
     count: int = 5
     mode: str = "assisted"
-    headless: bool | None = None
+    headless: bool = True
+
+
+class QuestionAnswerRequest(BaseModel):
+    question: str
+    answer: str
 
 
 class CoverLetterUpdate(BaseModel):
@@ -195,6 +262,7 @@ class PipelineRunRequest(BaseModel):
     region: str = "EMEA"
     countries: list[str] = Field(default_factory=list)
     strict_region: bool = True
+    easy_apply_only: bool = False
 
 
 class PruneRegionRequest(BaseModel):
@@ -309,11 +377,26 @@ def get_stats() -> dict[str, Any]:
     }
 
 
+def _read_easy_apply_flag(app_folder: Path) -> str:
+    """Reads the EASY_APPLY.txt marker: 'true' or 'unknown' (jobs scraped
+    before the Easy-Apply filter existed have no marker at all)."""
+    marker = app_folder / "EASY_APPLY.txt"
+    if not marker.exists():
+        return "unknown"
+    try:
+        return marker.read_text(encoding="utf-8").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 @app.get("/api/applications")
 def list_applications(
     search: str | None = Query(None, description="Search keyword"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    easy_apply_only: bool = Query(
+        False, description="Only return jobs tagged as LinkedIn Easy Apply"
+    ),
 ) -> dict[str, Any]:
     """Lists pending applications with metadata."""
     if not output_apps_dir.exists():
@@ -328,6 +411,9 @@ def list_applications(
     if search:
         s_lower = search.lower()
         folders = [d for d in folders if s_lower in d.name.lower()]
+
+    if easy_apply_only:
+        folders = [d for d in folders if _read_easy_apply_flag(d) == "true"]
 
     total = len(folders)
     page_folders = folders[offset : offset + limit]
@@ -352,6 +438,7 @@ def list_applications(
                 "created_at": datetime.fromtimestamp(
                     app_folder.stat().st_mtime
                 ).strftime("%Y-%m-%d %H:%M"),
+                "easy_apply": _read_easy_apply_flag(app_folder),
             }
         )
 
@@ -575,21 +662,21 @@ def run_auto_apply_for_job(
     if not info["job_url"].startswith("http"):
         raise HTTPException(status_code=400, detail="Invalid job URL")
 
-    with automation_lock:
-        if AUTOMATION_STATE.get("is_active"):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Automator is currently applying for {AUTOMATION_STATE.get('company')} — please wait.",
-            )
-        set_automation_hud(
-            is_active=True,
-            app_id=app_id,
-            company=info["company"],
-            title=info["title"],
-            step="init",
-            message=f"Starting auto-apply for {info['company']}...",
-            progress_pct=10,
+    if _browser_slot_queue.empty():
+        raise HTTPException(
+            status_code=409,
+            detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now — please wait.",
         )
+
+    set_automation_hud(
+        is_active=True,
+        app_id=app_id,
+        company=info["company"],
+        title=info["title"],
+        step="init",
+        message=f"Starting auto-apply for {info['company']}...",
+        progress_pct=10,
+    )
 
     def hud_callback(
         step: str, message: str, level: str, details: dict[str, Any]
@@ -621,11 +708,46 @@ def run_auto_apply_for_job(
         )
 
     def run_worker():
+        slot_id = acquire_browser_slot(timeout=300)
+        if slot_id is None:
+            set_automation_hud(
+                is_active=False,
+                step="error",
+                message="Timed out waiting for a free browser slot.",
+                level="ERROR",
+                progress_pct=100,
+            )
+            return
+
+        slot_dir = ensure_slot_seeded(slot_id)
         automator = BrowserAutomator(
-            headless=body.headless, status_callback=hud_callback
+            headless=body.headless,
+            status_callback=hud_callback,
+            profile_dir=slot_dir,
         )
         try:
             automator.start()
+
+            valid, verify_msg = verify_linkedin_session(automator.context)
+            LINKEDIN_LIVE_STATUS["checked"] = True
+            LINKEDIN_LIVE_STATUS["valid"] = valid
+            LINKEDIN_LIVE_STATUS["message"] = verify_msg
+            LINKEDIN_LIVE_STATUS["checked_at"] = datetime.now().strftime("%H:%M:%S")
+            if not valid:
+                set_automation_hud(
+                    is_active=False,
+                    step="login_required",
+                    message=f"LinkedIn session invalid: {verify_msg}. Please relogin.",
+                    level="ERROR",
+                    progress_pct=0,
+                )
+                log_event(
+                    f"Apply blocked - not really logged in to LinkedIn: {verify_msg}. Relogin required.",
+                    level="ERROR",
+                    category="Auto-Apply",
+                )
+                return
+
             if body.mode == "autonomous":
                 status, msg = automator.run_autonomous_apply(
                     app_dir=app_folder,
@@ -665,6 +787,7 @@ def run_auto_apply_for_job(
             )
         finally:
             automator.close()
+            release_browser_slot(slot_id)
 
     background_tasks.add_task(run_worker)
     return {
@@ -1010,6 +1133,20 @@ def get_automation_status() -> dict[str, Any]:
     return state
 
 
+@app.get("/api/automation/live-view")
+def get_automation_live_view() -> FileResponse:
+    """Returns the most recent screenshot of the browser agent's live page,
+    captured automatically at each automation step."""
+    live_path = project_root / "data" / "live_view.png"
+    if not live_path.exists():
+        raise HTTPException(status_code=404, detail="No live view available yet")
+    return FileResponse(
+        str(live_path),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
+
+
 @app.post("/api/automation/submit-code")
 def submit_verification_code(body: SubmitCodeRequest) -> dict[str, Any]:
     """Submits a 2FA or email verification code to the active browser automation session."""
@@ -1029,13 +1166,62 @@ def submit_verification_code(body: SubmitCodeRequest) -> dict[str, Any]:
     }
 
 
+@app.get("/api/questions/pending")
+def get_pending_questions() -> dict[str, Any]:
+    """Screening questions the automation could not answer on its own."""
+    from job_applier.automation.question_store import (  # type: ignore[import-not-found]
+        list_answers,
+        list_pending,
+    )
+
+    return {"pending": list_pending(), "answered": list_answers()}
+
+
+@app.post("/api/questions/answer")
+def answer_pending_question(body: QuestionAnswerRequest) -> dict[str, str]:
+    """Stores the candidate's answer so every future application reuses it."""
+    from job_applier.automation.question_store import (  # type: ignore[import-not-found]
+        save_answer,
+    )
+
+    if not body.question.strip():
+        raise HTTPException(status_code=400, detail="Question is required")
+    save_answer(body.question, body.answer)
+    log_event(
+        f"Saved screening answer: {body.question[:60]} -> {body.answer[:40]}",
+        level="SUCCESS",
+        category="Questions",
+    )
+    return {"status": "success", "message": "Answer saved and will be reused."}
+
+
 @app.get("/api/auth/status")
 def get_auth_status() -> dict[str, Any]:
     """Returns platform authentication status for LinkedIn, BestJobs, eJobs, and Google."""
     from job_applier.automation.auth_manager import AuthManager
 
     manager = AuthManager()
-    return manager.check_auth_status()
+    status = manager.check_auth_status()
+    status["linkedin_live"] = dict(LINKEDIN_LIVE_STATUS)
+    return status
+
+
+@app.post("/api/auth/verify-linkedin")
+def verify_linkedin_live() -> dict[str, Any]:
+    """Actually loads the synced cookies in a browser and checks whether
+    LinkedIn accepts them - the cheap /api/auth/status check only confirms a
+    cookie file exists, which can be true while LinkedIn still rejects it."""
+    valid, message = verify_linkedin_session()
+    LINKEDIN_LIVE_STATUS["checked"] = True
+    LINKEDIN_LIVE_STATUS["valid"] = valid
+    LINKEDIN_LIVE_STATUS["message"] = message
+    LINKEDIN_LIVE_STATUS["checked_at"] = datetime.now().strftime("%H:%M:%S")
+    log_event(
+        f"LinkedIn live session check: {message}",
+        level="SUCCESS" if valid else "ERROR",
+        category="Auth",
+    )
+    return dict(LINKEDIN_LIVE_STATUS)
 
 
 @app.post("/api/auth/login")
@@ -1154,21 +1340,103 @@ def batch_apply(
             status_code=400, detail="No valid applications found for batch"
         )
 
+    if _browser_slot_queue.empty():
+        raise HTTPException(
+            status_code=409,
+            detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now — please wait.",
+        )
+
+    def batch_hud_callback(
+        info: dict[str, Any], step: str, message: str, level: str, details: dict[str, Any]
+    ) -> None:
+        step_progress = {
+            "init": 10,
+            "navigating": 25,
+            "form_detection": 55,
+            "resume_upload": 80,
+            "submitting": 90,
+            "submitted": 100,
+            "submission_failed": 100,
+        }
+        set_automation_hud(
+            is_active=True,
+            company=info["company"],
+            title=info["title"],
+            step=step,
+            message=message,
+            level=level,
+            progress_pct=step_progress.get(step, 50),
+            details=details,
+        )
+
     def run_batch():
+        slot_id = acquire_browser_slot(timeout=300)
+        if slot_id is None:
+            log_event(
+                "Batch auto-apply couldn't start: all browser slots busy.",
+                level="ERROR",
+                category="Auto-Apply",
+            )
+            return
+
+        slot_dir = ensure_slot_seeded(slot_id)
         try:
-            automator = BrowserAutomator(headless=body.headless)
+            automator = BrowserAutomator(
+                headless=body.headless, profile_dir=slot_dir
+            )
             try:
                 automator.start()
-                for f in folders:
+
+                valid, verify_msg = verify_linkedin_session(automator.context)
+                LINKEDIN_LIVE_STATUS["checked"] = True
+                LINKEDIN_LIVE_STATUS["valid"] = valid
+                LINKEDIN_LIVE_STATUS["message"] = verify_msg
+                LINKEDIN_LIVE_STATUS["checked_at"] = datetime.now().strftime("%H:%M:%S")
+                if not valid:
+                    set_automation_hud(
+                        is_active=False,
+                        step="login_required",
+                        message=f"LinkedIn session invalid: {verify_msg}. Please relogin.",
+                        level="ERROR",
+                        progress_pct=0,
+                    )
+                    log_event(
+                        f"Batch blocked before touching any job - not really logged in to "
+                        f"LinkedIn: {verify_msg}. Relogin required.",
+                        level="ERROR",
+                        category="Auto-Apply",
+                    )
+                    return
+
+                for idx, f in enumerate(folders):
                     info = parse_app_folder_info(f)
                     if not info["job_url"].startswith("http"):
                         continue
+                    if idx > 0:
+                        # Space applies out like a human browsing, not a
+                        # script firing every ~10s - that pace is what
+                        # tripped LinkedIn's bot detection last run.
+                        pause = random.uniform(25, 70)
+                        set_automation_hud(
+                            is_active=True,
+                            company=info["company"],
+                            title=info["title"],
+                            step="pacing",
+                            message=f"Pausing {pause:.0f}s before next application...",
+                            level="INFO",
+                            progress_pct=0,
+                            details={},
+                        )
+                        time.sleep(pause)
+                    automator.status_callback = lambda step, msg, level, details, info=info: batch_hud_callback(
+                        info, step, msg, level, details
+                    )
                     if body.mode == "autonomous":
-                        status, _ = automator.run_autonomous_apply(
+                        status, detail = automator.run_autonomous_apply(
                             f, info["job_url"], info["company"], info["title"]
                         )
                     else:
-                        status, _ = automator.run_assisted_apply(
+                        status, detail = automator.run_assisted_apply(
                             f,
                             info["job_url"],
                             info["company"],
@@ -1182,10 +1450,30 @@ def batch_apply(
                             shutil.move(str(f), str(target))
                         except Exception:
                             pass
+
+                    # LinkedIn just killed this session - it will keep killing
+                    # it for every remaining job too, so stop burning the rest
+                    # of the queue against a dead session instead of grinding
+                    # through 10+ more guaranteed failures.
+                    if "login wall" in (detail or "").lower():
+                        log_event(
+                            "Batch stopped early: LinkedIn logged out this session "
+                            f"(hit at '{info['company']} - {info['title']}'). "
+                            f"{idx + 1}/{len(folders)} jobs attempted. Re-sync cookies "
+                            "and resume for the rest.",
+                            level="WARN",
+                            category="Auto-Apply",
+                        )
+                        break
             finally:
                 automator.close()
+                set_automation_hud(
+                    is_active=False, step="idle", message="Batch complete", progress_pct=100
+                )
         except Exception as e:
             print(f"Notice: Batch auto-apply ended with message: {e}")
+        finally:
+            release_browser_slot(slot_id)
 
     background_tasks.add_task(run_batch)
     return {
@@ -1254,6 +1542,14 @@ def get_tracker_data(status: str | None = Query(None)) -> dict[str, Any]:
                                 break
                     except OSError:
                         pass
+
+    # Best-effort Easy Apply tagging, derived from each record's own app folder
+    for r in records:
+        cv_path = r.get("cv_path", "").strip()
+        folder = Path(cv_path).parent if cv_path else None
+        r["easy_apply"] = (
+            _read_easy_apply_flag(folder) if folder and folder.exists() else "unknown"
+        )
 
     return {
         "records": records,
@@ -1428,9 +1724,11 @@ def trigger_pipeline(
         api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
 
     if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail="GOOGLE_API_KEY is missing. Please set it in your .env file or environment variables.",
+        log_event(
+            "GOOGLE_API_KEY not set — resumes/cover letters will use the master "
+            "resume as-is, without AI tailoring.",
+            level="WARN",
+            category="Pipeline",
         )
 
     def run_pipeline_worker():
@@ -1456,6 +1754,7 @@ def trigger_pipeline(
                 auto_apply=body.auto_apply,
                 autonomous=body.autonomous,
                 headless=body.headless,
+                easy_apply_only=body.easy_apply_only,
             )
             PIPELINE_STATE["status"] = "completed"
             log_event(
@@ -1491,6 +1790,36 @@ def clear_system_logs() -> dict[str, str]:
     """Clears in-memory log buffer."""
     clear_logs()
     return {"status": "success", "message": "Console logs cleared successfully"}
+
+
+AUTO_CLEANUP_INTERVAL_SECONDS = 6 * 3600
+AUTO_CLEANUP_OLDER_THAN_DAYS = 7
+
+
+def _auto_cleanup_loop() -> None:
+    """Periodically clears out stale queue entries so the dashboard doesn't
+    accumulate old or dead applications: anything older than
+    AUTO_CLEANUP_OLDER_THAN_DAYS, plus everything marked failed/duplicate."""
+    while True:
+        time.sleep(AUTO_CLEANUP_INTERVAL_SECONDS)
+        try:
+            cleanup_applications(
+                CleanupRequest(older_than_days=AUTO_CLEANUP_OLDER_THAN_DAYS)
+            )
+            clear_failed_applications()
+            from job_applier.dedup import prune_duplicate_applications
+
+            prune_duplicate_applications()
+            log_event(
+                f"Auto-cleanup: removed queue entries older than "
+                f"{AUTO_CLEANUP_OLDER_THAN_DAYS} days, failed attempts, and duplicates.",
+                category="System",
+            )
+        except Exception as e:
+            print(f"Notice: auto-cleanup cycle failed: {e}")
+
+
+threading.Thread(target=_auto_cleanup_loop, daemon=True).start()
 
 
 # Mount compiled Angular single-page application if built

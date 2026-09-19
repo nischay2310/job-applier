@@ -58,3 +58,8 @@ htmlcov/
 
 # Logs
 *.log
+
+# Personal data - resume, screenshots and backups never leave this machine
+data/*.pdf
+data/*.png
+data/backups/

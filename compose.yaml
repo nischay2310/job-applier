@@ -2,9 +2,10 @@ name: job-applier
 
 services:
   app:
-    image: ${JOB_APPLIER_IMAGE:-ghcr.io/ervinpopescu/job-applier:latest}
     build:
       context: .
+      dockerfile: Dockerfile
+    image: job-applier:local
     restart: unless-stopped
     init: true
     environment:
@@ -14,12 +15,18 @@ services:
       JOB_APPLIER_DB_PATH: /app/data/job_applier.db
       JOB_APPLIER_TRACKER_PATH: /app/data/applications_tracker.csv
     ports:
-      - "${JOB_APPLIER_BIND_ADDRESS:-127.0.0.1}:${JOB_APPLIER_PORT:-8000}:8000"
+      - "${JOB_APPLIER_BIND_ADDRESS:-0.0.0.0}:${JOB_APPLIER_PORT:-8000}:8000"
     volumes:
+      - ./src:/app/src:cached
+      - ./frontend/dist:/app/frontend/dist:cached
+      - ./frontend/public:/app/frontend/public:cached
+      - ./deploy:/app/deploy:cached
       - job-applier-data:/app/data
       - job-applier-output:/app/output
       - job-applier-browser-profile:/app/.browser_profile
+      - ${LINKEDIN_COOKIES_PATH:-./deploy/no-cookies-placeholder}:/opt/job-applier-defaults/linkedin_cookies.db:ro
     shm_size: "1gb"
+    command: ["/bin/bash", "-c", "watchmedo auto-restart --directory=/app/src --pattern='*.py;*.json;*.html' --recursive --debug-force-polling --interval=1 -- python -m job_applier.cli.web_app --host 0.0.0.0 --port 8000 --no-browser --no-reload"]
     healthcheck:
       test:
         [

@@ -56,10 +56,18 @@ def clean_stale_chrome_locks(profile_dir: Path) -> None:
 
 
 def get_cookie_db_path(profile_dir: Path) -> Path | None:
-    """Finds SQLite Cookies file in standard Chrome layout."""
+    """Finds SQLite Cookies file in standard Chrome layout.
+
+    Modern Chrome (the "Network Service" cookie store) keeps the live,
+    actually-used cookie database at Default/Network/Cookies — that's what
+    gets seeded and what the browser reads/writes during real runs.
+    Default/Cookies is a legacy path that can exist alongside it (Chrome
+    creates it too, holding only tracking cookies, no auth tokens) and must
+    not shadow the real one.
+    """
     for cand in [
-        profile_dir / "Default" / "Cookies",
         profile_dir / "Default" / "Network" / "Cookies",
+        profile_dir / "Default" / "Cookies",
         profile_dir / "Cookies",
     ]:
         if cand.exists():

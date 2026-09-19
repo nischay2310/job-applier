@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import time
+import urllib.request
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -19,15 +21,26 @@ from job_applier.automation.cloudflare import (  # type: ignore[import-not-found
     is_cloudflare_challenge,
     solve_cloudflare_turnstile,
 )
+from job_applier.automation.question_store import (  # type: ignore[import-not-found]
+    record_pending,
+)
 from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
     QuestionSolver,
 )
 from job_applier.logger import log_event  # type: ignore[import-not-found]
+from job_applier.scrapers.job_filters import (  # type: ignore[import-not-found]
+    is_excluded_application_url,
+)
 from job_applier.scrapers.activity_checker import (  # type: ignore[import-not-found]
     is_job_active,
 )
 from job_applier.tracker import record_application  # type: ignore[import-not-found]
 from job_applier.utils import get_project_root
+
+
+HOST_CHROME_HOSTNAME = os.environ.get("HOST_CHROME_HOSTNAME", "host.docker.internal")
+HOST_CHROME_CDP_PORT = os.environ.get("HOST_CHROME_CDP_PORT", "9222")
+USE_HOST_CHROME = os.environ.get("USE_HOST_CHROME", "1") not in ("0", "false", "False")
 
 
 def is_display_available() -> bool:
@@ -67,6 +80,75 @@ def clean_stale_chrome_locks(profile_dir: Path) -> None:
                     lp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _check_feed_page(page: Any) -> tuple[bool, str]:
+    """Navigates an already-open page to the feed and reports whether
+    LinkedIn serves it or bounces to the login wall."""
+    page.goto(
+        "https://www.linkedin.com/feed/",
+        wait_until="domcontentloaded",
+        timeout=20000,
+    )
+    page.wait_for_timeout(2000)
+    url = (page.url or "").lower()
+    pwd_visible = page.locator("input[type=password]").count() > 0
+    if "/login" in url or "/signin" in url or pwd_visible:
+        return False, "LinkedIn rejected the session (redirected to login)"
+    return True, "LinkedIn session verified live"
+
+
+def verify_linkedin_session(context: Any | None = None) -> tuple[bool, str]:
+    """Actually loads the synced cookies in a browser and checks whether
+    LinkedIn accepts them, instead of just trusting that the cookie file
+    exists. A li_at value can be present and still get bounced to the login
+    wall the moment it's replayed in this container's browser.
+
+    Pass an existing Playwright context when one is already open - starting a
+    second sync_playwright() in the same thread is not supported and fails
+    with "Sync API inside the asyncio loop"."""
+    if context is not None:
+        page = None
+        try:
+            page = context.new_page()
+            return _check_feed_page(page)
+        except Exception as e:
+            return False, f"Could not verify session: {e}"
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+    cookies_path = get_project_root() / "data" / "linkedin_cookies.json"
+    if not cookies_path.exists():
+        return False, "No synced cookies found"
+
+    try:
+        with open(cookies_path, encoding="utf-8") as f:
+            cookies = json.load(f)
+    except Exception as e:
+        return False, f"Could not read synced cookies: {e}"
+
+    if not cookies:
+        return False, "Synced cookie file is empty"
+
+    from playwright.sync_api import (  # type: ignore[import-not-found, import-untyped]
+        sync_playwright,
+    )
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                own_context = browser.new_context()
+                own_context.add_cookies(cookies)
+                return _check_feed_page(own_context.new_page())
+            finally:
+                browser.close()
+    except Exception as e:
+        return False, f"Could not verify session: {e}"
 
 
 ACTIVE_AUTOMATOR: BrowserAutomator | None = None
@@ -118,6 +200,9 @@ class BrowserAutomator:
         project_root = get_project_root()
         self.profile_dir = profile_dir or (project_root / ".browser_profile")
 
+        self.use_host_chrome = USE_HOST_CHROME
+        self.using_host_chrome = False
+
         self.playwright: Any = None
         self.browser: Any = None
         self.context: Any = None
@@ -130,13 +215,79 @@ class BrowserAutomator:
         level: str = "INFO",
         details: dict[str, Any] | None = None,
     ) -> None:
-        """Dispatches structured log event and triggers live status callback."""
+        """Dispatches structured log event, captures a live-view screenshot,
+        and triggers the live status callback."""
         log_event(message, level=level, category="Auto-Apply")
+        if self.page is not None:
+            try:
+                live_path = get_project_root() / "data" / "live_view.png"
+                self.page.screenshot(path=str(live_path))
+            except Exception:
+                pass
         if self.status_callback:
             try:
                 self.status_callback(step, message, level, details or {})
             except Exception as cb_err:
                 print(f"Notice in status callback: {cb_err}")
+
+    def _inject_plaintext_cookies(self) -> None:
+        """Loads cookies from data/linkedin_cookies.json (plaintext, extracted
+        via CDP from a real logged-in browser) into the current context.
+
+        Chrome's own Cookies SQLite file cannot just be copied between
+        machines/environments — since Chrome ~127+ on Windows, sensitive
+        cookie values are protected with "v20" App-Bound Encryption, which is
+        cryptographically tied to that specific Windows Chrome install and
+        cannot be decrypted anywhere else (including this Linux container).
+        Plaintext cookies extracted from an authenticated session via CDP
+        (Network.getCookies through the browser's own decrypted state) sidestep
+        that entirely, and work identically across every browser profile/slot.
+        """
+        cookies_path = get_project_root() / "data" / "linkedin_cookies.json"
+        if not cookies_path.exists():
+            return
+        try:
+            with open(cookies_path, encoding="utf-8") as f:
+                cookies = json.load(f)
+            if cookies:
+                self.context.add_cookies(cookies)
+                print(f"Injected {len(cookies)} plaintext cookies into browser context.")
+        except Exception as e:
+            print(f"Notice: could not inject plaintext cookies: {e}")
+
+    def _connect_host_chrome(self) -> bool:
+        """Attaches to the user's own already-logged-in desktop Chrome over CDP
+        instead of driving a fresh containerised browser.
+
+        LinkedIn terminates the whole account session about a minute after a
+        replayed-cookie headless browser starts submitting; the real browser is
+        the session LinkedIn already trusts, so drive that one directly.
+        Chrome only accepts CDP Host headers that are localhost or a bare IP,
+        so host.docker.internal has to be resolved before connecting."""
+        try:
+            host_ip = socket.gethostbyname(HOST_CHROME_HOSTNAME)
+            req = urllib.request.Request(
+                f"http://{host_ip}:{HOST_CHROME_CDP_PORT}/json/version",
+                headers={"Host": f"localhost:{HOST_CHROME_CDP_PORT}"},
+            )
+            info = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+            ws = (
+                info["webSocketDebuggerUrl"]
+                .replace("localhost", host_ip)
+                .replace("127.0.0.1", host_ip)
+            )
+            self.browser = self.playwright.chromium.connect_over_cdp(ws)
+            self.context = self.browser.contexts[0]
+            self.page = self.context.new_page()
+            self.using_host_chrome = True
+            print(f"Attached to desktop Chrome over CDP at {host_ip}:{HOST_CHROME_CDP_PORT}")
+            return True
+        except Exception as e:
+            print(f"Notice: could not attach to desktop Chrome ({e}).")
+            self.browser = None
+            self.context = None
+            self.page = None
+            return False
 
     def start(self) -> None:
         """Starts Playwright and launches the browser with automatic fallbacks."""
@@ -151,6 +302,11 @@ class BrowserAutomator:
             self.playwright = sync_playwright().start()
             global ACTIVE_AUTOMATOR
             ACTIVE_AUTOMATOR = self
+
+            if self.use_host_chrome and self._connect_host_chrome():
+                self.page.set_default_navigation_timeout(30000)
+                self.page.set_default_timeout(10000)
+                return
 
             # Prefer installed Google Chrome
             chrome_path = "/usr/bin/google-chrome"
@@ -196,6 +352,7 @@ class BrowserAutomator:
                     if self.context.pages
                     else self.context.new_page()
                 )
+                self._inject_plaintext_cookies()
             else:
                 kwargs = {
                     "headless": self.headless,
@@ -212,6 +369,7 @@ class BrowserAutomator:
                     user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
                 )
                 self.page = self.context.new_page()
+                self._inject_plaintext_cookies()
 
             # Set sensible navigation timeouts
             self.page.set_default_navigation_timeout(30000)
@@ -225,6 +383,17 @@ class BrowserAutomator:
     def close(self) -> None:
         """Closes browser and stops Playwright engine."""
         try:
+            if self.using_host_chrome:
+                # Never tear down the user's own Chrome - only drop the tab
+                # this run opened, then detach.
+                if self.page:
+                    try:
+                        self.page.close()
+                    except Exception:
+                        pass
+                if self.playwright:
+                    self.playwright.stop()
+                return
             if self.context:
                 self.context.close()
             if self.browser:
@@ -268,10 +437,18 @@ class BrowserAutomator:
         if not self.page:
             self.start()
 
+        if is_excluded_application_url(job_url):
+            self._notify(
+                "skipped",
+                f"Skipping excluded platform (Workday) for {job_url}",
+                level="WARN",
+            )
+            return False
+
         print(f" Navigating to: {job_url}")
         try:
             self.page.goto(job_url, wait_until="domcontentloaded")
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
             print(f" Navigation error: {e}")
             return False
@@ -336,21 +513,43 @@ class BrowserAutomator:
             "[data-automation-id='applyButton']",
         ]
 
-        # Only click apply if we are not already on an application form page
+        # Only click apply if we are not already on an application form page.
+        # A bare `form` selector false-positives on LinkedIn's own top-nav job
+        # search form, which is present on every job listing page whether or
+        # not Easy Apply has been opened — so this must require something an
+        # actual application form has: a resume upload field, or real form
+        # controls inside a modal/dialog (how Easy Apply and most ATS present
+        # their forms).
         has_form = (
             self.page.locator(
-                "form, input[type=file], input#email, input[name=email]"
+                "input[type=file], "
+                "[role='dialog'] input, [role='dialog'] textarea, [role='dialog'] select, "
+                ".jobs-easy-apply-modal"
             ).count()
             > 0
         )
         if not has_form:
+            clicked = False
             for selector in apply_selectors:
                 try:
-                    locator = self.page.locator(selector).first
-                    if locator.is_visible(timeout=1000):
-                        print(f" Clicking '{selector}' to open application form...")
-                        locator.click()
-                        time.sleep(3)
+                    matches = self.page.locator(selector)
+                    # LinkedIn (and others) render hidden duplicate/placeholder
+                    # buttons matching the same text before the real one, so
+                    # `.first` alone can silently lock onto an invisible match
+                    # and never reach the actual clickable button. Check every
+                    # match for the first one that's genuinely visible.
+                    match_count = min(matches.count(), 5)
+                    for i in range(match_count):
+                        candidate = matches.nth(i)
+                        if candidate.is_visible(timeout=800):
+                            print(
+                                f" Clicking '{selector}' (match {i}) to open application form..."
+                            )
+                            candidate.click()
+                            time.sleep(3)
+                            clicked = True
+                            break
+                    if clicked:
                         # Check if a new tab was opened
                         if len(self.context.pages) > initial_pages_count:
                             self.page = self.context.pages[-1]
@@ -361,6 +560,33 @@ class BrowserAutomator:
                     continue
 
         return True
+
+    def _form_root(self) -> Any:
+        """Returns the Easy Apply modal/dialog as the scope for form-filling
+        when one is open, else falls back to the whole page. Without this,
+        field-filling selectors like a generic 'input:not([type=hidden])...'
+        can reach OUTSIDE the modal and hit LinkedIn's own page chrome (e.g.
+        the global top-nav search box), typing garbage into unrelated site
+        controls instead of the actual application form.
+        """
+        try:
+            dialog = self.page.locator(
+                "[role='dialog'], .jobs-easy-apply-modal"
+            ).first
+            if dialog.count() > 0 and dialog.is_visible(timeout=500):
+                return dialog
+        except Exception:
+            pass
+
+        # LinkedIn's Easy Apply is always a modal. If no dialog is open there
+        # is no form to read, and scanning the page instead would pick up
+        # LinkedIn's own chrome (top-nav search, feed composer). Hand back an
+        # empty scope so callers find nothing rather than the wrong thing.
+        if self.detect_platform(self.page.url) == "LinkedIn":
+            return self.page.locator("[role='dialog'], .jobs-easy-apply-modal")
+
+        # Other ATS (Greenhouse, Lever, Workday) render full-page forms.
+        return self.page
 
     def _dismiss_overlays(self) -> None:
         """Dismisses modal overlays (LinkedIn sign-in prompts) and cookie banners."""
@@ -428,7 +654,7 @@ class BrowserAutomator:
     ) -> None:
         """Fills custom React-Select / ARIA Combobox dropdowns (e.g. Greenhouse custom questions)."""
         try:
-            combos = self.page.locator("input[role='combobox']").all()
+            combos = self._form_root().locator("input[role='combobox']").all()
             for c in combos:
                 try:
                     if not c.is_visible(timeout=300):
@@ -496,16 +722,34 @@ class BrowserAutomator:
         if is_cloudflare_challenge(self.page):
             solve_cloudflare_turnstile(self.page)
 
+        platform = self.detect_platform(self.page.url)
         report: dict[str, Any] = {
             "fields_filled": [],
             "resume_uploaded": False,
             "cover_letter_filled": False,
             "questions_answered": [],
-            "platform": self.detect_platform(self.page.url),
+            "needs_review": [],
+            "platform": platform,
         }
 
-        # 1. Locate CV PDF and Cover Letter
-        cv_pdf = next(app_dir.glob("CV_*.pdf"), None)
+        # Give the solver this posting's text so open-ended questions are
+        # answered against the real role rather than generically.
+        jd_file = app_dir / "job_description.txt"
+        if jd_file.exists():
+            try:
+                with open(jd_file, encoding="utf-8") as f:
+                    self.question_solver.job_description = f.read()
+            except Exception:
+                pass
+
+        # 1. Locate CV PDF and Cover Letter. On LinkedIn, always use the
+        # candidate's real named resume rather than the per-job generated
+        # one - the generated CV is only a tailoring fallback.
+        default_resume = get_project_root() / "data" / "default_resume.pdf"
+        if platform == "LinkedIn" and default_resume.exists():
+            cv_pdf = default_resume
+        else:
+            cv_pdf = next(app_dir.glob("CV_*.pdf"), None)
         cover_letter_file = app_dir / "cover_letter.txt"
         cover_letter_text = ""
         if cover_letter_file.exists():
@@ -545,27 +789,35 @@ class BrowserAutomator:
                 "button:has-text('Apply')",
                 "a:has-text('Apply')",
             ]
+            clicked_fallback = False
             for btn_sel in apply_buttons:
                 try:
-                    locator = self.page.locator(btn_sel).first
-                    if locator.is_visible(timeout=1000):
-                        print(
-                            f" Found unclicked apply button '{btn_sel}'. Clicking to open form..."
-                        )
-                        locator.click()
-                        time.sleep(3)
-                        self._fill_standard_inputs(report, cover_letter_text)
-                        self._fill_select_inputs(report)
-                        if not report["resume_uploaded"] and cv_pdf and cv_pdf.exists():
-                            report["resume_uploaded"] = self._upload_resume(
-                                str(cv_pdf.resolve())
+                    matches = self.page.locator(btn_sel)
+                    match_count = min(matches.count(), 5)
+                    for i in range(match_count):
+                        candidate = matches.nth(i)
+                        if candidate.is_visible(timeout=800):
+                            print(
+                                f" Found unclicked apply button '{btn_sel}' (match {i}). Clicking to open form..."
                             )
+                            candidate.click()
+                            time.sleep(3)
+                            self._fill_standard_inputs(report, cover_letter_text)
+                            self._fill_select_inputs(report)
+                            if not report["resume_uploaded"] and cv_pdf and cv_pdf.exists():
+                                report["resume_uploaded"] = self._upload_resume(
+                                    str(cv_pdf.resolve())
+                                )
+                            clicked_fallback = True
+                            break
+                    if clicked_fallback:
                         break
                 except Exception:
                     continue
 
         # 6. Answer screening questions
         self._answer_custom_questions(report, job_title, company)
+        self._answer_radio_groups(report, job_title, company)
 
         # 7. Check common consent / agreement checkboxes
         self._check_consent_boxes()
@@ -580,7 +832,7 @@ class BrowserAutomator:
     def _upload_resume(self, cv_path: str) -> bool:
         """Uploads the tailored CV PDF to file inputs."""
         try:
-            file_inputs = self.page.locator("input[type=file]")
+            file_inputs = self._form_root().locator("input[type=file]")
             count = file_inputs.count()
             if count > 0:
                 print(
@@ -598,8 +850,8 @@ class BrowserAutomator:
         self, report: dict[str, Any], cover_letter_text: str
     ) -> None:
         """Fills text, email, phone, link, and textarea fields."""
-        inputs = self.page.locator(
-            "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]):not([type=checkbox]):not([type=radio]), textarea"
+        inputs = self._form_root().locator(
+            "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=password]), textarea"
         )
         count = inputs.count()
 
@@ -751,7 +1003,7 @@ class BrowserAutomator:
 
     def _fill_select_inputs(self, report: dict[str, Any]) -> None:
         """Selects options for dropdown fields like Country, Authorization, Sponsorship."""
-        selects = self.page.locator("select")
+        selects = self._form_root().locator("select")
         count = selects.count()
 
         for i in range(count):
@@ -789,8 +1041,8 @@ class BrowserAutomator:
         self, report: dict[str, Any], job_title: str, company: str
     ) -> None:
         """Detects remaining unfilled fields and uses QuestionSolver to answer them."""
-        unfilled_inputs = self.page.locator(
-            "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]):not([type=checkbox]):not([type=radio]), textarea"
+        unfilled_inputs = self._form_root().locator(
+            "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=password]), textarea"
         )
         count = unfilled_inputs.count()
 
@@ -807,7 +1059,7 @@ class BrowserAutomator:
                 label_text = self._get_element_descriptor(el)
                 if len(label_text.strip()) > 5:
                     answer = self.question_solver.answer_question(
-                        label_text,
+                        self._get_question_label(el) or label_text,
                         job_title=job_title,
                         company=company,
                     )
@@ -818,14 +1070,117 @@ class BrowserAutomator:
                             {"question": label_text[:50], "answer": answer}
                         )
                         report["fields_filled"].append(f"Question: {label_text[:30]}")
+                    else:
+                        # Genuinely unknown - leave it unfilled and flag it
+                        # rather than guessing, so the candidate can answer
+                        # it themselves before submitting.
+                        clean_label = self._get_question_label(el) or label_text
+                        record_pending(
+                            clean_label,
+                            company=company,
+                            job_title=job_title,
+                            required=self._is_required(el),
+                        )
+                        report.setdefault("needs_review", []).append(
+                            clean_label[:120]
+                        )
+                        self._highlight_element(el, color="#ff9800")
 
+            except Exception:
+                continue
+
+    def _radio_groups(self) -> list[dict[str, Any]]:
+        """Reads every radio-button question on the current step as
+        {question, required, options:[{value,label}], name}."""
+        try:
+            return self._form_root().evaluate("""root => {
+                const radios = Array.from(root.querySelectorAll("input[type=radio]"));
+                const groups = {};
+                for (const r of radios) {
+                    const name = r.getAttribute('name') || '';
+                    if (!name) continue;
+                    if (!groups[name]) {
+                        const fs = r.closest('fieldset');
+                        let q = '';
+                        if (fs) {
+                            const legend = fs.querySelector('legend');
+                            if (legend) q = legend.innerText || '';
+                        }
+                        if (!q) q = r.getAttribute('aria-label') || '';
+                        groups[name] = {
+                            name: name,
+                            question: q.trim(),
+                            required: /\\*/.test(q) || r.required
+                                || r.getAttribute('aria-required') === 'true',
+                            options: [],
+                            answered: false,
+                        };
+                    }
+                    const lbl = (r.labels && r.labels[0]) ? r.labels[0].innerText.trim() : '';
+                    groups[name].options.push({
+                        value: r.value || lbl,
+                        label: lbl || r.value || '',
+                    });
+                    if (r.checked) groups[name].answered = true;
+                }
+                return Object.values(groups);
+            }""")
+        except Exception:
+            return []
+
+    def _answer_radio_groups(
+        self, report: dict[str, Any], job_title: str, company: str
+    ) -> None:
+        """Answers radio questions (Yes/No screeners), recording any it can't
+        answer so the candidate can supply them from the Tracker page."""
+        for group in self._radio_groups():
+            try:
+                if group.get("answered"):
+                    continue
+                question = (group.get("question") or "").strip()
+                if len(question) < 5:
+                    continue
+                option_labels = [
+                    o["label"] for o in group.get("options", []) if o.get("label")
+                ]
+                answer = self.question_solver.answer_question(
+                    question,
+                    options=option_labels,
+                    job_title=job_title,
+                    company=company,
+                )
+                if not answer:
+                    record_pending(
+                        question,
+                        options=option_labels,
+                        company=company,
+                        job_title=job_title,
+                        required=bool(group.get("required")),
+                    )
+                    report.setdefault("needs_review", []).append(question[:120])
+                    continue
+
+                radios = self._form_root().locator(
+                    f"input[type=radio][name='{group['name']}']"
+                )
+                for i in range(radios.count()):
+                    radio = radios.nth(i)
+                    label = self._get_element_descriptor(radio)
+                    value = (radio.get_attribute("value") or "").lower()
+                    if answer.lower() in label or answer.lower() == value:
+                        radio.check()
+                        report["questions_answered"].append(
+                            {"question": question[:50], "answer": answer}
+                        )
+                        report["fields_filled"].append(f"Question: {question[:30]}")
+                        break
             except Exception:
                 continue
 
     def _check_consent_boxes(self) -> None:
         """Checks required consent or agreement checkboxes (e.g. Privacy policy)."""
         try:
-            checkboxes = self.page.locator("input[type=checkbox]")
+            checkboxes = self._form_root().locator("input[type=checkbox]")
             count = checkboxes.count()
             for i in range(count):
                 cb = checkboxes.nth(i)
@@ -860,13 +1215,49 @@ class BrowserAutomator:
         except Exception:
             return ""
 
-    def _highlight_element(self, el: Any) -> None:
-        """Applies a green border highlight to indicate automated fill."""
+    def _get_question_label(self, el: Any) -> str:
+        """Human-readable question text for an input, without the element
+        name/id noise that _get_element_descriptor mixes in for matching."""
         try:
-            el.evaluate("""el => {
-                el.style.backgroundColor = '#f1f8e9';
-                el.style.border = '2px solid #43a047';
+            return (
+                el.evaluate("""el => {
+                const lbl = el.labels && el.labels[0] ? el.labels[0].innerText : '';
+                if (lbl && lbl.trim()) return lbl.trim();
+                const aria = el.getAttribute('aria-label') || '';
+                if (aria.trim()) return aria.trim();
+                return el.getAttribute('placeholder') || '';
             }""")
+                or ""
+            ).strip()
+        except Exception:
+            return ""
+
+    def _is_required(self, el: Any) -> bool:
+        """A question is mandatory when the platform marks it required or its
+        visible label ends in the '*' the candidate asked us to look for."""
+        try:
+            return bool(
+                el.evaluate("""el => {
+                if (el.required || el.getAttribute('aria-required') === 'true') return true;
+                const lbl = el.labels && el.labels[0] ? el.labels[0].innerText : '';
+                return /\\*/.test(lbl);
+            }""")
+            )
+        except Exception:
+            return False
+
+    def _highlight_element(self, el: Any, color: str = "#43a047") -> None:
+        """Applies a colored border highlight. Green (default) marks an
+        automated fill; a different color (e.g. orange) can flag a field
+        that was left for the candidate to answer manually."""
+        try:
+            el.evaluate(
+                """(el, color) => {
+                el.style.backgroundColor = color === '#43a047' ? '#f1f8e9' : '#fff3e0';
+                el.style.border = '2px solid ' + color;
+            }""",
+                color,
+            )
         except Exception:
             pass
 
@@ -923,9 +1314,12 @@ class BrowserAutomator:
         ]
         for sel in submit_selectors:
             try:
-                btn = self.page.locator(sel).first
-                if btn.is_visible(timeout=1000):
-                    return btn
+                matches = self.page.locator(sel)
+                match_count = min(matches.count(), 5)
+                for i in range(match_count):
+                    btn = matches.nth(i)
+                    if btn.is_visible(timeout=800):
+                        return btn
             except Exception:
                 continue
         return None
@@ -1153,6 +1547,17 @@ class BrowserAutomator:
                         "fields_filled": report.get("fields_filled", []),
                         "resume_uploaded": report.get("resume_uploaded", False),
                         "validation_errors": self._detect_validation_errors(),
+                        # Everything below is what actually makes a failure
+                        # diagnosable: where it stopped, what blocked it, and
+                        # what the form looked like at that moment.
+                        "stopped_at_step": report.get("stopped_at_step"),
+                        "steps_completed": report.get("steps_completed"),
+                        "questions_answered": report.get("questions_answered", []),
+                        "needs_review": report.get("needs_review", []),
+                        "inline_errors": self._validation_errors(),
+                        "unanswered_required": self._unanswered_required_fields(),
+                        "current_url": self.page.url if self.page else "",
+                        "form_visible_text": self._form_fingerprint(),
                     },
                     f,
                     indent=2,
@@ -1166,6 +1571,206 @@ class BrowserAutomator:
                 f.write(self.page.content() if self.page else "")
         except OSError as err:
             print(f"Notice: Could not save diagnostic_dom.html: {err}")
+
+    def _options_for_question(self, label: str) -> list[str]:
+        """Choices available for a question, so the Tracker can offer buttons
+        (Yes/No) instead of a free-text box."""
+        try:
+            return (
+                self._form_root().evaluate(
+                    """(root, label) => {
+                const norm = s => (s || '').replace(/\\*/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const target = norm(label);
+                for (const fs of root.querySelectorAll('fieldset')) {
+                    if (norm(fs.innerText).startsWith(target.slice(0, 40))) {
+                        return Array.from(fs.querySelectorAll('input[type=radio]'))
+                            .map(r => (r.labels && r.labels[0] ? r.labels[0].innerText : r.value) || '')
+                            .map(s => s.trim()).filter(Boolean);
+                    }
+                }
+                for (const sel of root.querySelectorAll('select')) {
+                    const lbl = sel.labels && sel.labels[0] ? sel.labels[0].innerText : '';
+                    if (norm(lbl).startsWith(target.slice(0, 40))) {
+                        return Array.from(sel.options).map(o => o.text.trim())
+                            .filter(t => t && !/^select/i.test(t));
+                    }
+                }
+                return [];
+            }""",
+                    label,
+                )
+                or []
+            )
+        except Exception:
+            return []
+
+    def _unanswered_required_fields(self) -> list[dict[str, Any]]:
+        """Every required field on the current step that is still empty - the
+        concrete reason a wizard refuses to advance or submit."""
+        try:
+            return (
+                self._form_root().evaluate("""root => {
+                const out = [];
+                const els = root.querySelectorAll(
+                    "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]), textarea, select"
+                );
+                for (const el of els) {
+                    const type = (el.getAttribute('type') || el.tagName).toLowerCase();
+                    const lbl = el.labels && el.labels[0] ? el.labels[0].innerText : '';
+                    const aria = el.getAttribute('aria-label') || '';
+                    const required = el.required
+                        || el.getAttribute('aria-required') === 'true'
+                        || /\\*/.test(lbl);
+                    if (!required) continue;
+                    let empty;
+                    if (type === 'radio' || type === 'checkbox') {
+                        const name = el.getAttribute('name');
+                        empty = name
+                            ? !root.querySelector("input[name='" + name + "']:checked")
+                            : !el.checked;
+                    } else {
+                        empty = !(el.value || '').trim();
+                    }
+                    if (!empty) continue;
+                    const label = (lbl || aria || '').trim();
+                    if (!label) continue;
+                    if (!out.some(o => o.label === label)) {
+                        out.push({ label: label.slice(0, 160), type: type });
+                    }
+                }
+                return out;
+            }""")
+                or []
+            )
+        except Exception:
+            return []
+
+    def _form_fingerprint(self) -> str:
+        """Snapshot of the current wizard step's visible text, used to tell a
+        real step change from a click that got rejected by validation."""
+        try:
+            return (self._form_root().inner_text() or "")[:2000]
+        except Exception:
+            return ""
+
+    def _validation_errors(self) -> list[str]:
+        """Collects the inline error messages the platform is showing on the
+        current step (e.g. 'Please make a selection')."""
+        errors: list[str] = []
+        selectors = [
+            ".artdeco-inline-feedback--error",
+            "[role='alert']",
+            ".fb-dash-form-element__error-field",
+        ]
+        root = self._form_root()
+        for sel in selectors:
+            try:
+                matches = root.locator(sel)
+                for i in range(min(matches.count(), 8)):
+                    el = matches.nth(i)
+                    if not el.is_visible(timeout=300):
+                        continue
+                    text = (el.inner_text() or "").strip()
+                    if text and text not in errors:
+                        errors.append(text[:120])
+            except Exception:
+                continue
+        return errors
+
+    def _advance_multistep_form(
+        self,
+        app_dir: Path,
+        job_title: str = "",
+        company: str = "",
+        max_steps: int = 8,
+    ) -> dict[str, Any]:
+        """LinkedIn Easy Apply (and many other ATS) forms are multi-step
+        wizards — Contact info -> Resume -> Screening questions -> Review ->
+        Submit — not a single page. Fills whatever is visible on the current
+        step, then clicks 'Next'/'Continue'/'Review' to advance and fills the
+        next step, repeating until no further advance button is found (i.e.
+        we've reached the final review/submit step). The actual final
+        'Submit application' click is intentionally left to the caller.
+        """
+        combined: dict[str, Any] = {
+            "fields_filled": [],
+            "resume_uploaded": False,
+            "cover_letter_filled": False,
+            "questions_answered": [],
+            "needs_review": [],
+            "platform": self.detect_platform(self.page.url),
+        }
+        next_selectors = [
+            "button[aria-label='Continue to next step']",
+            "button[aria-label='Review your application']",
+            "button:has-text('Next')",
+            "button:has-text('Continue')",
+        ]
+        for step in range(max_steps):
+            step_report = self.fill_application_form(app_dir, job_title, company)
+            combined["fields_filled"].extend(step_report["fields_filled"])
+            combined["resume_uploaded"] = (
+                combined["resume_uploaded"] or step_report["resume_uploaded"]
+            )
+            combined["cover_letter_filled"] = (
+                combined["cover_letter_filled"] or step_report["cover_letter_filled"]
+            )
+            combined["questions_answered"].extend(step_report["questions_answered"])
+            combined["needs_review"].extend(step_report.get("needs_review", []))
+
+            before = self._form_fingerprint()
+            advanced = False
+            for sel in next_selectors:
+                try:
+                    matches = self.page.locator(sel)
+                    match_count = min(matches.count(), 5)
+                    for i in range(match_count):
+                        btn = matches.nth(i)
+                        if btn.is_visible(timeout=800):
+                            self._notify(
+                                "form_detection",
+                                f"Advancing to wizard step {step + 2} via '{sel}'...",
+                            )
+                            btn.click()
+                            time.sleep(2)
+                            advanced = True
+                            break
+                    if advanced:
+                        break
+                except Exception:
+                    continue
+            if not advanced:
+                break
+
+            # Clicking Next doesn't mean the step actually moved: LinkedIn
+            # keeps you on the same step and shows an inline error when a
+            # required question wasn't answered. Without this check the loop
+            # just re-clicks the same blocked button until max_steps.
+            if before and self._form_fingerprint() == before:
+                combined["stopped_at_step"] = step + 1
+                combined["blocked_reason"] = "step_did_not_advance"
+                # Name the actual fields holding it up, not just the platform's
+                # generic "Please make a selection".
+                unanswered = self._unanswered_required_fields()
+                blockers = [f["label"] for f in unanswered] or self._validation_errors()
+                # Put the blockers in front of the candidate. Without this a
+                # question the field handlers never recognised just stalls the
+                # run forever with nothing to answer in the Tracker.
+                for field in unanswered:
+                    options = self._options_for_question(field["label"])
+                    record_pending(
+                        field["label"],
+                        options=options,
+                        company=company,
+                        job_title=job_title,
+                        required=True,
+                    )
+                combined["needs_review"].extend(
+                    blockers or ["A required question on this step needs your answer"]
+                )
+                break
+            combined["steps_completed"] = step + 1
+        return combined
 
     def run_assisted_apply(
         self,
@@ -1187,7 +1792,7 @@ class BrowserAutomator:
         if not success:
             return "failed", "Could not navigate to job URL"
 
-        report = self.fill_application_form(
+        report = self._advance_multistep_form(
             app_dir, job_title=job_title, company=company
         )
         fields_str = ", ".join(report["fields_filled"][:6])
@@ -1206,6 +1811,34 @@ class BrowserAutomator:
         if report["questions_answered"]:
             print(
                 f"  • AI Questions:      {len(report['questions_answered'])} answered"
+            )
+
+        if report.get("needs_review"):
+            questions_list = "; ".join(report["needs_review"][:5])
+            proof_path = app_dir / "submission_failed.png"
+            try:
+                self.page.screenshot(path=str(proof_path))
+            except Exception:
+                pass
+            self._notify(
+                "needs_review",
+                f"Could not confidently answer {len(report['needs_review'])} question(s) for "
+                f"{company} - {job_title}, left for manual review: {questions_list}",
+                level="WARN",
+            )
+            record_application(
+                company=company,
+                title=job_title,
+                job_url=job_url,
+                status="needs_review",
+                platform=report["platform"],
+                submission_type="assisted_browser",
+                proof_path=str(proof_path) if proof_path.exists() else "",
+                notes=f"Unanswered questions: {questions_list}",
+            )
+            return (
+                "needs_review",
+                f"{len(report['needs_review'])} question(s) need your input before this can be submitted",
             )
 
         submit_btn = self.find_submit_button()
@@ -1328,10 +1961,38 @@ class BrowserAutomator:
         if not success:
             return "failed", "Could not navigate to job URL"
 
-        report = self.fill_application_form(
+        report = self._advance_multistep_form(
             app_dir, job_title=job_title, company=company
         )
         time.sleep(2)
+
+        if report.get("needs_review"):
+            questions_list = "; ".join(report["needs_review"][:5])
+            proof_path = app_dir / "submission_failed.png"
+            try:
+                self.page.screenshot(path=str(proof_path))
+            except Exception:
+                pass
+            self._notify(
+                "needs_review",
+                f"Could not confidently answer {len(report['needs_review'])} question(s) for "
+                f"{company} - {job_title}, left for manual review: {questions_list}",
+                level="WARN",
+            )
+            record_application(
+                company=company,
+                title=job_title,
+                job_url=job_url,
+                status="needs_review",
+                platform=report["platform"],
+                submission_type="autonomous_browser",
+                proof_path=str(proof_path) if proof_path.exists() else "",
+                notes=f"Unanswered questions: {questions_list}",
+            )
+            return (
+                "needs_review",
+                f"{len(report['needs_review'])} question(s) need your input before this can be submitted",
+            )
 
         submit_btn = self.find_submit_button()
         if not submit_btn:

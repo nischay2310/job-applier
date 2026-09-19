@@ -113,6 +113,12 @@ class RegionScope:
                 ):
                     return True, "Remote position in Romania"
                 return False, "Remote position is not verified for Romania"
+            elif self.region == "INDIA":
+                if re.search(
+                    r"\b(india|apac|asia pacific|worldwide|global)\b", desc_clean, re.I
+                ):
+                    return True, "Remote position open to India/APAC"
+                return True, "Generic remote without regional restrictions"
 
             return True, "Remote position accepted"
 
@@ -131,6 +137,8 @@ class RegionScope:
             return "romania"
         if self.region == "USA":
             return "usa"
+        if self.region == "INDIA":
+            return "india"
         if self.region in ["EMEA", "EUROPE"]:
             return "uk"
         return "usa"

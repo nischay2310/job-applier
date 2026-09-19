@@ -112,6 +112,13 @@
               >
                 <i data-lucide="activity" class="w-3.5 h-3.5"></i>
                 <span>Tracker</span>
+                <span
+                  x-show="pendingQuestions.length > 0"
+                  x-cloak
+                  class="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-500/25 border border-amber-500/50 text-amber-300 font-bold animate-pulse"
+                  :title="pendingQuestions.length + ' question(s) need your answer'"
+                  x-text="pendingQuestions.length + ' ?'"
+                ></span>
               </button>
               <button
                 @click="activeTab = 'pipeline'"
@@ -187,6 +194,41 @@
         </div>
       </header>
 
+      <!-- LinkedIn Relogin Required Banner -->
+      <div
+        x-show="loginRequiredBanner"
+        x-cloak
+        class="bg-rose-950/60 border-b border-rose-800/60 px-4 sm:px-6 lg:px-8 py-2.5"
+      >
+        <div
+          class="max-w-7xl mx-auto flex items-center justify-between gap-4 flex-wrap"
+        >
+          <div class="flex items-center gap-2 text-rose-200 text-xs font-medium">
+            <i data-lucide="alert-triangle" class="w-4 h-4 flex-shrink-0"></i>
+            <span
+              >LinkedIn rejected the current session — applying is paused so
+              nothing gets wasted on a dead login. Please relogin, then
+              resync.</span
+            >
+          </div>
+          <div class="flex items-center gap-2 flex-shrink-0">
+            <button
+              @click="openAuthModal()"
+              class="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold transition"
+            >
+              Relogin / Resync
+            </button>
+            <button
+              @click="loginRequiredBanner = false"
+              class="text-rose-300 hover:text-rose-100 p-1"
+              title="Dismiss"
+            >
+              <i data-lucide="x" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Content Area -->
       <main
         class="flex-1 w-full mx-auto p-4 sm:p-6 lg:p-8 transition-all duration-300"
@@ -255,6 +297,12 @@
               </div>
             </div>
             <div class="flex items-center space-x-3 text-xs">
+              <button
+                @click="openLiveView()"
+                class="px-2.5 py-1 rounded-md border font-semibold flex items-center gap-1.5 bg-amber-950/40 text-amber-300 border-amber-700/50 hover:bg-amber-900/50 transition"
+              >
+                <i data-lucide="eye" class="w-3.5 h-3.5"></i> Watch Live
+              </button>
               <span
                 class="px-2.5 py-1 rounded-md border font-mono"
                 :class="automationStatus.is_active ? 'bg-slate-800 text-emerald-300 border-emerald-500/30 font-semibold' : 'bg-slate-950 text-slate-500 border-slate-800'"
@@ -347,6 +395,22 @@
                 class="w-full pl-10 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors"
               />
             </div>
+
+            <label
+              class="flex items-center space-x-2 px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-slate-300 cursor-pointer hover:border-slate-700 transition"
+              title="Only show jobs confirmed as LinkedIn Easy Apply"
+            >
+              <input
+                type="checkbox"
+                x-model="easyApplyOnlyFilter"
+                @change="loadApplications()"
+                class="rounded text-sky-400 bg-slate-950 border-slate-700 focus:ring-0"
+              />
+              <span class="text-sky-300 font-medium flex items-center gap-1"
+                ><i data-lucide="zap" class="w-3.5 h-3.5"></i> Easy Apply
+                Only</span
+              >
+            </label>
 
             <div class="flex items-center space-x-3">
               <!-- Batch Auto-Apply Trigger -->
@@ -534,6 +598,24 @@
                       Cover Letter
                     </span>
                     <span
+                      x-show="app.easy_apply === 'true'"
+                      class="px-2 py-0.5 rounded-md bg-sky-950/60 text-sky-300 border border-sky-700/60 flex items-center gap-1 font-semibold"
+                    >
+                      <i data-lucide="zap" class="w-3 h-3 text-sky-400"></i>
+                      Easy Apply
+                    </span>
+                    <span
+                      x-show="app.easy_apply !== 'true'"
+                      class="px-2 py-0.5 rounded-md bg-amber-950/40 text-amber-300 border border-amber-700/50 flex items-center gap-1"
+                      title="Not confirmed as LinkedIn Easy Apply — may redirect to an external site"
+                    >
+                      <i
+                        data-lucide="external-link"
+                        class="w-3 h-3 text-amber-400"
+                      ></i>
+                      External / Unverified
+                    </span>
+                    <span
                       class="text-slate-500 ml-auto"
                       x-text="app.created_at"
                     ></span>
@@ -581,6 +663,13 @@
                       <i data-lucide="copy" class="w-3.5 h-3.5"></i> Copy Letter
                     </button>
                     <button
+                      @click="openLiveView()"
+                      class="hover:text-amber-400 flex items-center gap-1 transition"
+                      title="Watch the browser agent live, whichever job it's currently working on"
+                    >
+                      <i data-lucide="eye" class="w-3.5 h-3.5"></i> Watch Live
+                    </button>
+                    <button
                       @click="deleteApp(app.id)"
                       class="hover:text-rose-400 p-1 rounded transition"
                       title="Delete"
@@ -596,6 +685,86 @@
 
         <!-- TAB 2: APPLICATION TRACKER -->
         <section x-show="activeTab === 'tracker'" x-cloak>
+          <!-- Screening questions awaiting your answer -->
+          <div
+            x-show="pendingQuestions.length > 0"
+            class="mb-6 rounded-2xl bg-amber-950/30 border border-amber-700/50 overflow-hidden"
+          >
+            <div
+              class="px-5 py-3.5 border-b border-amber-800/40 flex items-center justify-between gap-3"
+            >
+              <div class="flex items-center gap-2">
+                <i
+                  data-lucide="help-circle"
+                  class="w-4 h-4 text-amber-300"
+                ></i>
+                <h3 class="text-sm font-bold text-amber-200">
+                  Questions I need your answer for
+                </h3>
+                <span
+                  class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  x-text="pendingQuestions.length"
+                ></span>
+              </div>
+              <p class="text-[11px] text-amber-200/70">
+                Answered once, reused on every future application.
+              </p>
+            </div>
+            <div class="divide-y divide-amber-900/30">
+              <template x-for="q in pendingQuestions" :key="q.key">
+                <div class="px-5 py-4">
+                  <div class="flex items-start gap-2 mb-2">
+                    <span
+                      x-show="q.required"
+                      class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 flex-shrink-0 mt-0.5"
+                      >Required</span
+                    >
+                    <p
+                      class="text-sm text-slate-100 font-medium"
+                      x-text="q.question"
+                    ></p>
+                  </div>
+                  <p
+                    class="text-[11px] text-slate-400 mb-2.5"
+                    x-text="'Seen on: ' + (q.seen_on || []).join(', ')"
+                  ></p>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <template x-if="(q.options || []).length > 0">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <template x-for="opt in q.options" :key="opt">
+                          <button
+                            type="button"
+                            @click="saveQuestionAnswer(q.question, opt)"
+                            class="px-3 py-1.5 bg-slate-800 hover:bg-emerald-600 border border-slate-700 hover:border-emerald-500 text-slate-200 hover:text-white rounded-lg text-xs font-semibold transition"
+                            x-text="opt"
+                          ></button>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="(q.options || []).length === 0">
+                      <div class="flex items-center gap-2 flex-1 min-w-[260px]">
+                        <input
+                          type="text"
+                          x-model="questionDrafts[q.key]"
+                          @keydown.enter="saveQuestionAnswer(q.question, questionDrafts[q.key])"
+                          placeholder="Type your answer..."
+                          class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          @click="saveQuestionAnswer(q.question, questionDrafts[q.key])"
+                          class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
           <div
             class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6"
           >
@@ -790,18 +959,32 @@
                         ></span>
                       </td>
                       <td class="py-3 px-4">
-                        <select
-                          :value="record.status"
-                          @change="updateTrackerStatus(record.job_url, $event.target.value)"
-                          class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-slate-300 focus:outline-none"
-                        >
-                          <option value="applied">Applied</option>
-                          <option value="auto_filled">Auto-filled</option>
-                          <option value="interviewing">Interviewing</option>
-                          <option value="offered">Offered</option>
-                          <option value="rejected">Rejected</option>
-                          <option value="skipped">Skipped</option>
-                        </select>
+                        <div class="flex items-center gap-2">
+                          <span
+                            class="px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap"
+                            :class="{
+                              'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40': record.status === 'applied',
+                              'bg-rose-500/20 text-rose-300 border border-rose-500/40': record.status === 'failed' || record.status === 'validation_failed',
+                              'bg-amber-500/20 text-amber-300 border border-amber-500/40': record.status === 'needs_review',
+                              'bg-slate-700/40 text-slate-300 border border-slate-600/40': !['applied','failed','validation_failed','needs_review'].includes(record.status),
+                            }"
+                            x-text="(record.status || 'pending').replace('_',' ')"
+                          ></span>
+                          <select
+                            :value="record.status"
+                            @change="updateTrackerStatus(record.job_url, $event.target.value)"
+                            class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-slate-300 focus:outline-none"
+                          >
+                            <option value="applied">Applied</option>
+                            <option value="auto_filled">Auto-filled</option>
+                            <option value="failed">Failed</option>
+                            <option value="needs_review">Needs Review</option>
+                            <option value="interviewing">Interviewing</option>
+                            <option value="offered">Offered</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="skipped">Skipped</option>
+                          </select>
+                        </div>
                       </td>
                       <td
                         class="py-3 px-4 text-slate-400 text-[11px]"
@@ -822,6 +1005,19 @@
                             class="w-3 h-3 inline"
                           ></i>
                           <span>Diagnostics</span>
+                        </button>
+                        <button
+                          x-show="(record.status === 'failed' || record.status === 'validation_failed' || record.status === 'needs_review') && record.folder_name"
+                          type="button"
+                          @click="reapplyNow(record)"
+                          class="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 hover:text-emerald-200 border border-emerald-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition shadow-sm"
+                          title="Re-run auto-apply for this job right now"
+                        >
+                          <i
+                            data-lucide="refresh-cw"
+                            class="w-3.5 h-3.5 inline"
+                          ></i>
+                          <span>Reapply Now</span>
                         </button>
                         <button
                           type="button"
@@ -939,9 +1135,20 @@
 
               <!-- Job Sites Selection -->
               <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-2"
-                  >Target Job Sites & ATS Platforms</label
-                >
+                <div class="flex items-center justify-between mb-2">
+                  <label class="block text-xs font-semibold text-slate-300"
+                    >Target Job Sites & ATS Platforms</label
+                  >
+                  <button
+                    type="button"
+                    @click="toggleAllSites()"
+                    class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-medium border border-slate-700 transition"
+                  >
+                    <span
+                      x-text="pipelineForm.sites.length === 0 ? '✓ Check All' : '✗ Uncheck All'"
+                    ></span>
+                  </button>
+                </div>
                 <div
                   class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-slate-300"
                 >
@@ -1095,7 +1302,7 @@
                     Regional Scope & Allowed Locations
                   </label>
                   <span class="text-[10px] text-slate-500 font-mono"
-                    >Filters out US-only/non-EMEA residency requirements</span
+                    >Filters out jobs with non-matching residency requirements</span
                   >
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1104,8 +1311,9 @@
                       x-model="pipelineForm.region"
                       class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-medium"
                     >
+                      <option value="INDIA">🇮🇳 India Only (Default)</option>
                       <option value="EMEA">
-                        🌍 EMEA & Global Remote (Default)
+                        🌍 EMEA & Global Remote
                       </option>
                       <option value="EUROPE">🇪🇺 Europe & UK Only</option>
                       <option value="ROMANIA">🇷🇴 Romania Only</option>
@@ -1118,7 +1326,7 @@
                     <input
                       type="text"
                       x-model="pipelineForm.countries"
-                      placeholder="Optional countries/cities: Romania, UK, Germany, Netherlands, Switzerland..."
+                      placeholder="Optional cities: Bangalore, Hyderabad, Pune, Noida, Gurugram..."
                       class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 placeholder:text-slate-600"
                     />
                   </div>
@@ -1141,6 +1349,19 @@
                     <i data-lucide="globe" class="w-3.5 h-3.5"></i>
                     Remote / Telework positions only (optimizes LinkedIn, Indeed
                     & Glassdoor for global remote)
+                  </span>
+                </label>
+                <label class="flex items-center space-x-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    x-model="pipelineForm.easy_apply_only"
+                    class="rounded border-slate-800 bg-slate-950 text-sky-400 focus:ring-sky-500"
+                  />
+                  <span
+                    class="text-sky-300 font-medium flex items-center gap-1.5"
+                  >
+                    <i data-lucide="zap" class="w-3.5 h-3.5"></i>
+                    LinkedIn Easy Apply jobs only
                   </span>
                 </label>
                 <label class="flex items-center space-x-2 cursor-pointer">
@@ -1781,6 +2002,70 @@
       </div>
     </div>
 
+    <!-- LIVE BROWSER AGENT VIEW MODAL -->
+    <div
+      x-show="liveView.open"
+      x-cloak
+      class="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/85 backdrop-blur-md"
+    >
+      <div
+        @click.away="closeLiveView()"
+        class="bg-slate-900 border border-slate-800 w-full max-w-4xl rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+      >
+        <div
+          class="p-4 px-6 border-b border-slate-800 flex items-center justify-between bg-slate-900"
+        >
+          <div class="flex items-center space-x-3">
+            <div
+              class="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400"
+            >
+              <i data-lucide="eye" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                Live Browser Agent View
+                <span
+                  class="w-2 h-2 rounded-full"
+                  :class="automationStatus.is_active ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"
+                ></span>
+              </h3>
+              <p
+                class="text-xs text-slate-400"
+                x-text="automationStatus.is_active ? (automationStatus.company + ' — ' + automationStatus.title + ' · ' + automationStatus.step) : 'No automation currently running — showing the last captured frame'"
+              ></p>
+            </div>
+          </div>
+          <button
+            @click="closeLiveView()"
+            class="text-slate-400 hover:text-white p-1 rounded-lg"
+          >
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+        <div class="flex-1 overflow-auto bg-slate-950 p-4">
+          <img
+            :src="liveViewSrc"
+            class="w-full rounded-xl border border-slate-800"
+            alt="Live browser agent screenshot"
+            @error="liveViewError = true"
+            @load="liveViewError = false"
+          />
+          <p
+            x-show="liveViewError"
+            class="text-center text-xs text-slate-500 py-10"
+          >
+            No live view captured yet — it appears as soon as the agent opens
+            a job page.
+          </p>
+        </div>
+        <div
+          class="px-6 py-2.5 border-t border-slate-800 text-[11px] text-slate-500 font-mono"
+        >
+          Auto-refreshing every second while this window is open
+        </div>
+      </div>
+    </div>
+
     <!-- PLATFORM AUTHENTICATION & SESSIONS MODAL -->
     <div
       x-show="authModal.open"
@@ -1866,21 +2151,48 @@
                       :class="authModal.platforms?.linkedin?.status === 'logged_in' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400 border border-slate-700'"
                       x-text="authModal.platforms?.linkedin?.status === 'logged_in' ? 'Connected' : 'Not Connected'"
                     ></span>
+                    <span
+                      x-show="authModal.platforms?.linkedin_live?.checked"
+                      class="px-1.5 py-0.2 rounded text-[10px] font-bold"
+                      :class="authModal.platforms?.linkedin_live?.valid ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'"
+                      :title="authModal.platforms?.linkedin_live?.message"
+                      x-text="authModal.platforms?.linkedin_live?.valid ? 'Verified live' : 'Rejected by LinkedIn'"
+                    ></span>
                   </div>
                   <p class="text-xs text-slate-400">
                     Required for LinkedIn Easy Apply
                   </p>
+                  <p
+                    x-show="authModal.platforms?.linkedin_live?.checked"
+                    class="text-[11px] text-slate-500"
+                    x-text="'Last verified: ' + (authModal.platforms?.linkedin_live?.checked_at || '') + ' - ' + (authModal.platforms?.linkedin_live?.message || '')"
+                  ></p>
                 </div>
               </div>
-              <button
-                @click="launchPlatformLogin('linkedin')"
-                :disabled="authModal.launchingPlatform === 'linkedin'"
-                class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition"
-              >
-                <span
-                  x-text="authModal.launchingPlatform === 'linkedin' ? 'Opening...' : 'Connect / Log In'"
-                ></span>
-              </button>
+              <div class="flex flex-col items-end gap-1.5">
+                <button
+                  @click="verifyLinkedInLive()"
+                  :disabled="authModal.verifyingLinkedIn"
+                  class="px-3.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition inline-flex items-center gap-1.5"
+                  title="Actually load your synced cookies in a browser and check whether LinkedIn accepts them"
+                >
+                  <i
+                    data-lucide="shield-check"
+                    class="w-3.5 h-3.5"
+                    :class="authModal.verifyingLinkedIn ? 'animate-spin' : ''"
+                  ></i>
+                  <span x-text="authModal.verifyingLinkedIn ? 'Verifying...' : 'Verify Login Now'"></span>
+                </button>
+                <button
+                  @click="launchPlatformLogin('linkedin')"
+                  :disabled="authModal.launchingPlatform === 'linkedin'"
+                  class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition"
+                >
+                  <span
+                    x-text="authModal.launchingPlatform === 'linkedin' ? 'Opening...' : 'Connect / Log In'"
+                  ></span>
+                </button>
+              </div>
             </div>
 
             <!-- BestJobs -->
@@ -2002,6 +2314,7 @@
           isBatchRunning: false,
           isApplying: {},
           searchQuery: "",
+          easyApplyOnlyFilter: false,
           applications: [],
           trackerRecords: [],
           trackerStatusFilter: "",
@@ -2009,39 +2322,36 @@
           pipelineStatus: { is_running: false, logs: [] },
           pipelineForm: {
             terms:
-              "Python Dev, Solutions Architect, Software Engineer, Cloud Architect, DevOps Engineer",
-            locations: "Bucharest",
-            limit: 20,
-            is_remote: false,
-            region: "EMEA",
+              "DevOps Engineer, Cloud Engineer, Site Reliability Engineer, Cloud Architect, Platform Engineer",
+            locations:
+              "Noida, Bangalore, Hyderabad, Pune, Gurugram, Delhi NCR, Remote India",
+            limit: 5,
+            is_remote: true,
+            region: "INDIA",
             countries: "",
             strict_region: true,
-            sites: [
-              "linkedin",
-              "indeed",
-              "ejobs",
-              "bestjobs",
-              "hipo",
-              "undelucram",
-              "jooble",
-              "google",
-              "greenhouse",
-              "lever",
-              "remote",
-              "glassdoor",
-            ],
+            sites: ["linkedin"],
+            easy_apply_only: true,
             auto_apply: false,
             autonomous: false,
           },
           profile: {},
           modal: { open: false, data: {} },
           diagModal: { open: false, data: {} },
+          liveView: { open: false },
+          liveViewSrc: "",
+          liveViewError: false,
+          liveViewInterval: null,
           authModal: {
             open: false,
             platforms: {},
             launchingPlatform: null,
             isSyncing: false,
+            verifyingLinkedIn: false,
           },
+          loginRequiredBanner: false,
+          pendingQuestions: [],
+          questionDrafts: {},
           verificationCodeInput: "",
           isSubmittingCode: false,
           isPruning: false,
@@ -2069,6 +2379,11 @@
               this.checkAutomationStatus();
               this.loadStats();
             }, 2000);
+            // Questions the automation gets stuck on should surface while a
+            // run is still going, not only after a manual page reload.
+            setInterval(() => {
+              this.loadPendingQuestions();
+            }, 5000);
             this.$nextTick(() => lucide.createIcons());
           },
 
@@ -2086,6 +2401,7 @@
               this.loadStats(),
               this.loadApplications(),
               this.loadTrackerData(),
+              this.loadPendingQuestions(),
               this.checkPipelineStatus(),
             ]);
             this.isLoading = false;
@@ -2105,6 +2421,8 @@
             try {
               const params = new URLSearchParams({ limit: "60" });
               if (this.searchQuery) params.append("search", this.searchQuery);
+              if (this.easyApplyOnlyFilter)
+                params.append("easy_apply_only", "true");
               const res = await fetch("/api/applications?" + params.toString());
               if (res.ok) {
                 const data = await res.json();
@@ -2181,6 +2499,29 @@
             } catch (e) {
               this.showToast("Failed to save profile: " + e, "error");
             }
+          },
+
+          openLiveView() {
+            this.liveView.open = true;
+            this.refreshLiveView();
+            if (!this.liveViewInterval) {
+              this.liveViewInterval = setInterval(
+                () => this.refreshLiveView(),
+                1000,
+              );
+            }
+          },
+
+          closeLiveView() {
+            this.liveView.open = false;
+            if (this.liveViewInterval) {
+              clearInterval(this.liveViewInterval);
+              this.liveViewInterval = null;
+            }
+          },
+
+          refreshLiveView() {
+            this.liveViewSrc = "/api/automation/live-view?t=" + Date.now();
           },
 
           async openApplicationModal(appId) {
@@ -2520,6 +2861,28 @@
             }
           },
 
+          toggleAllSites() {
+            const allSites = [
+              "linkedin",
+              "indeed",
+              "ejobs",
+              "bestjobs",
+              "hipo",
+              "undelucram",
+              "jooble",
+              "google",
+              "greenhouse",
+              "lever",
+              "remote",
+              "glassdoor",
+            ];
+            if (this.pipelineForm.sites.length === allSites.length) {
+              this.pipelineForm.sites = [];
+            } else {
+              this.pipelineForm.sites = [...allSites];
+            }
+          },
+
           async startPipeline() {
             const terms = this.pipelineForm.terms
               .split(",")
@@ -2547,6 +2910,7 @@
                         .filter(Boolean)
                     : [],
                   strict_region: this.pipelineForm.strict_region,
+                  easy_apply_only: this.pipelineForm.easy_apply_only,
                   auto_apply: this.pipelineForm.auto_apply,
                   autonomous: this.pipelineForm.autonomous,
                 }),
@@ -2592,6 +2956,9 @@
               if (res.ok) {
                 const data = await res.json();
                 this.automationStatus = data;
+                if (data.step === "login_required") {
+                  this.loginRequiredBanner = true;
+                }
                 if (data.is_active) {
                   this.$nextTick(() => lucide.createIcons());
                 }
@@ -2617,6 +2984,36 @@
               }
             } catch (e) {
               this.showToast("Failed to load diagnostics: " + e, "error");
+            }
+          },
+
+          async reapplyNow(record) {
+            if (!record.folder_name) {
+              this.showToast(
+                "No queued folder for this record - use Send to Queue instead",
+                "error",
+              );
+              return;
+            }
+            try {
+              const res = await fetch(
+                "/api/applications/" +
+                  encodeURIComponent(record.folder_name) +
+                  "/apply",
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ mode: "autonomous", headless: true }),
+                },
+              );
+              const data = await res.json();
+              if (res.ok) {
+                this.showToast("Reapplying now - watch live for progress.");
+              } else {
+                this.showToast(data.detail || "Could not start reapply", "error");
+              }
+            } catch (e) {
+              this.showToast("Error starting reapply: " + e, "error");
             }
           },
 
@@ -2670,6 +3067,66 @@
             }
           },
 
+          async loadPendingQuestions() {
+            try {
+              const res = await fetch("/api/questions/pending");
+              if (res.ok) {
+                const data = await res.json();
+                this.pendingQuestions = data.pending || [];
+                this.$nextTick(() => lucide.createIcons());
+              }
+            } catch (e) {
+              console.error("Error loading pending questions:", e);
+            }
+          },
+
+          async saveQuestionAnswer(question, answer) {
+            if (!answer || !String(answer).trim()) {
+              this.showToast("Please enter an answer first", "error");
+              return;
+            }
+            try {
+              const res = await fetch("/api/questions/answer", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ question: question, answer: answer }),
+              });
+              const data = await res.json();
+              if (res.ok) {
+                this.showToast("Saved - I'll use this on every application.");
+                await this.loadPendingQuestions();
+              } else {
+                this.showToast(data.detail || "Could not save answer", "error");
+              }
+            } catch (e) {
+              this.showToast("Error saving answer: " + e, "error");
+            }
+          },
+
+          async verifyLinkedInLive() {
+            this.authModal.verifyingLinkedIn = true;
+            try {
+              const res = await fetch("/api/auth/verify-linkedin", {
+                method: "POST",
+              });
+              const data = await res.json();
+              this.authModal.platforms.linkedin_live = data;
+              if (data.valid) {
+                this.loginRequiredBanner = false;
+                this.showToast("LinkedIn session verified - you're really logged in.");
+              } else {
+                this.showToast(
+                  "LinkedIn rejected this session: " + data.message,
+                  "error",
+                );
+              }
+            } catch (e) {
+              this.showToast("Error verifying LinkedIn session: " + e, "error");
+            } finally {
+              this.authModal.verifyingLinkedIn = false;
+            }
+          },
+
           async openAuthModal() {
             this.authModal.open = true;
             try {
@@ -2677,6 +3134,7 @@
               if (res.ok) {
                 const data = await res.json();
                 this.authModal.platforms = data.platforms || {};
+                this.authModal.platforms.linkedin_live = data.linkedin_live || null;
               }
             } catch (err) {
               console.error("Error checking auth status:", err);

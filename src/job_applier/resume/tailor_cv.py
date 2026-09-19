@@ -14,6 +14,34 @@ def generate_content_with_retry(client, model, contents):
     return client.models.generate_content(model=model, contents=contents)
 
 
+def _untailored_fallback(master_resume_text, target_role="", output_dir=None):
+    """Builds a resume/cover-letter pair straight from the master resume, with
+    no AI involved — used whenever GOOGLE_API_KEY isn't configured."""
+    tailored_json = json.loads(master_resume_text)
+
+    full_name = tailored_json.get("contact", {}).get("name", "").strip() or "Candidate"
+    role_label = target_role or "this position"
+    cover_letter = (
+        f"Dear Hiring Manager,\n\n"
+        f"I am writing to express my interest in {role_label} at your company. "
+        "With my background and experience, I believe I would be a strong fit for "
+        "this role. My resume is attached for your review, and I would welcome the "
+        "opportunity to discuss how my skills align with your team's needs.\n\n"
+        "Thank you for your time and consideration.\n\n"
+        f"Best regards,\n{full_name}"
+    )
+
+    if output_dir:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        with open(output_path / "tailored_resume.json", "w") as f:
+            json.dump(tailored_json, f, indent=2)
+        with open(output_path / "cover_letter.txt", "w") as f:
+            f.write(cover_letter)
+
+    return tailored_json, cover_letter
+
+
 def tailor_resume(
     api_key,
     master_resume_path,
@@ -26,12 +54,6 @@ def tailor_resume(
     job_description can be a path or the actual text.
     """
     effective_key = (api_key or os.environ.get("GOOGLE_API_KEY", "")).strip()
-    if not effective_key:
-        print(
-            "Error: GOOGLE_API_KEY is required. Please set it in .env or pass api_key."
-        )
-        return None, None
-    client = genai.Client(api_key=effective_key)
 
     # 2. Load Data
     try:
@@ -40,6 +62,14 @@ def tailor_resume(
     except FileNotFoundError:
         print(f"Error: Master resume not found at {master_resume_path}")
         return None, None
+
+    if not effective_key:
+        print(
+            "No GOOGLE_API_KEY set — using the master resume as-is, without AI tailoring."
+        )
+        return _untailored_fallback(master_resume, target_role, output_dir)
+
+    client = genai.Client(api_key=effective_key)
 
     # Handle JD as path or text
     jd_text = job_description

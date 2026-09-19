@@ -66,6 +66,7 @@ def fetch_jobs(
     region: str = "EMEA",
     countries: list[str] | None = None,
     emea_only: bool = True,
+    easy_apply_only: bool = False,
 ) -> Path | None:
     """
     Fetches jobs across LinkedIn, Indeed, Google Jobs, Greenhouse, Lever, and Remote tech boards.
@@ -112,6 +113,8 @@ def fetch_jobs(
                     )
                 if site == "linkedin":
                     kwargs["linkedin_fetch_description"] = True
+                    if easy_apply_only:
+                        kwargs["easy_apply"] = True
                 if site == "glassdoor":
                     kwargs["country_indeed"] = scope.get_jobspy_country_code(loc)
                     jobs_df = scrape_jobs(**kwargs)

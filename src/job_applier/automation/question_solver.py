@@ -6,6 +6,9 @@ import re
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
     CandidateProfile,
 )
+from job_applier.automation.question_store import (  # type: ignore[import-not-found]
+    get_answer,
+)
 from job_applier.utils import get_project_root
 
 
@@ -15,6 +18,9 @@ class QuestionSolver:
     def __init__(self, profile: CandidateProfile, api_key: str | None = None):
         self.profile = profile
         self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+        # Set per application so open-ended answers can refer to what the
+        # posting actually asks for.
+        self.job_description: str = ""
 
     def answer_question(
         self,
@@ -26,7 +32,14 @@ class QuestionSolver:
         """Determines the best answer for an application question."""
         cleaned_q = question_text.strip().lower()
 
-        # 1. Check custom user-defined answers
+        # 1a. Answers the candidate has already supplied for this question
+        # (from the Tracker page) always win - that's the whole point of
+        # asking them once and reusing it everywhere.
+        stored = get_answer(question_text)
+        if stored:
+            return self._match_to_options(stored, options)
+
+        # 1b. Check custom user-defined answers
         for key, ans in self.profile.custom_answers.items():
             if key.lower() in cleaned_q:
                 return self._match_to_options(ans, options)
@@ -147,11 +160,93 @@ class QuestionSolver:
         if ai_answer:
             return ai_answer
 
-        # 4. Fallback: if options provided, pick first reasonable or positive option
-        if options:
-            return self._match_to_options("Yes", options, default=options[0])
+        # 3b. Open-ended motivation questions ("What interests you about X?")
+        # deserve a real written answer rather than being left blank.
+        if not options and self._is_motivation_question(cleaned_q):
+            return self._write_motivation_answer(company, job_title)
 
-        return "Yes"
+        # 4. Genuinely unknown: don't guess. Returning empty leaves the field
+        # unfilled and lets the caller flag it for the candidate's review,
+        # instead of submitting a made-up "Yes" or an arbitrary first option.
+        return ""
+
+    MOTIVATION_MARKERS = (
+        "what interests you",
+        "why do you want to work",
+        "why are you interested",
+        "why this company",
+        "why do you want to join",
+        "what excites you",
+        "what thrills you",
+        "why would you like to join",
+        "what attracts you",
+        "tell us why",
+        "motivat",
+    )
+
+    def _is_motivation_question(self, cleaned_q: str) -> bool:
+        return any(marker in cleaned_q for marker in self.MOTIVATION_MARKERS)
+
+    def _job_themes(self, limit: int = 3) -> list[str]:
+        """Pulls the technologies this posting actually asks for, so the answer
+        refers to the real role instead of generic filler."""
+        if not self.job_description:
+            return []
+        text = self.job_description.lower()
+        vocabulary = [
+            "kubernetes",
+            "terraform",
+            "aws",
+            "azure",
+            "gcp",
+            "ci/cd",
+            "observability",
+            "platform engineering",
+            "site reliability",
+            "automation",
+            "containers",
+            "infrastructure as code",
+            "cost optimization",
+            "security",
+            "microservices",
+        ]
+        return [term for term in vocabulary if term in text][:limit]
+
+    def _write_motivation_answer(self, company: str, job_title: str) -> str:
+        """Writes a short, first-person answer for 'why this company' style
+        questions.
+
+        Deliberately grounded only in the posting and the candidate's own
+        background - inventing praise about a company we know nothing about
+        would put false claims in their application.
+        """
+        company_name = (company or "your team").replace("_", " ").strip()
+        themes = self._job_themes()
+        role = (job_title or "this role").replace("_", " ").strip()
+
+        if themes:
+            if len(themes) == 1:
+                theme_phrase = themes[0]
+            else:
+                theme_phrase = ", ".join(themes[:-1]) + " and " + themes[-1]
+            focus = (
+                f"The role's focus on {theme_phrase} lines up closely with what "
+                f"I do day to day"
+            )
+        else:
+            focus = (
+                f"The scope of {role} lines up closely with the infrastructure "
+                f"work I do day to day"
+            )
+
+        years = self.profile.years_of_experience or "several"
+        return (
+            f"{focus}. I've spent the last {years} years running production "
+            f"infrastructure at scale, and the part I enjoy most is making "
+            f"systems boringly reliable for the people building on top of them. "
+            f"That's the kind of problem I'd like to keep working on at "
+            f"{company_name}."
+        )
 
     def _match_to_options(
         self, target: str, options: list[str] | None, default: str = ""
