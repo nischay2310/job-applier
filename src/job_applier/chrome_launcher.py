@@ -10,6 +10,7 @@ Standard library only: start.py loads this before dependencies are installed.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -105,7 +106,9 @@ def ensure_chrome() -> tuple[bool, str]:
         "--profile-directory=Default",
         "--no-first-run",
         "--no-default-browser-check",
-        "--restore-last-session",
+        # Start clean: restoring the last session reopens every half-finished
+        # agent window. The login lives in cookies, not in open tabs.
+        "https://www.linkedin.com/feed/",
     ]
     # Chrome must outlive whatever started it - stopping the dashboard kills
     # its whole process tree. On Windows, "cmd /c start" hands Chrome off and
@@ -125,6 +128,27 @@ def ensure_chrome() -> tuple[bool, str]:
             return True, "Opened the automation Chrome."
         time.sleep(0.5)
     return False, f"Automation Chrome started but port {CDP_PORT} never answered."
+
+
+def close_idle_windows(keep_target_ids: set[str]) -> int:
+    """Closes automation Chrome tabs no running agent owns. One tab is always
+    left open - closing the last one would quit Chrome."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3) as r:
+            pages = [t for t in json.load(r) if t.get("type") == "page"]
+    except Exception:
+        return 0
+    idle = [t for t in pages if t["id"] not in keep_target_ids]
+    if len(idle) == len(pages):
+        idle = idle[1:]
+    closed = 0
+    for t in idle:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/close/{t['id']}", timeout=3)
+            closed += 1
+        except Exception:
+            pass
+    return closed
 
 
 def activate_target(target_id: str) -> bool:

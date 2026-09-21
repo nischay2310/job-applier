@@ -2077,6 +2077,14 @@
           </div>
           <div class="flex items-center gap-2">
             <button
+              @click="closeIdleWindows()"
+              class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5"
+              title="Close automation Chrome windows no running agent is using"
+            >
+              <i data-lucide="x-square" class="w-3.5 h-3.5"></i>
+              <span>Close idle windows</span>
+            </button>
+            <button
               @click="reconnectChrome()"
               :disabled="reconnectingChrome"
               class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
@@ -2640,6 +2648,15 @@
               const data = await res.json().catch(() => ({}));
               this.showToast(data.detail || "Couldn't bring that window forward", "error");
             }
+          },
+
+          async closeIdleWindows() {
+            const res = await fetch("/api/agents/close-idle", { method: "POST" });
+            const data = await res.json().catch(() => ({}));
+            this.showToast(
+              res.ok ? `Closed ${data.closed} idle window(s)` : "Couldn't reach the automation Chrome",
+              res.ok ? "success" : "error",
+            );
           },
 
           async reconnectChrome() {

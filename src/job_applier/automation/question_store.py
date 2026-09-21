@@ -15,10 +15,18 @@ def _store_path() -> Path:
     return get_project_root() / "data" / "screening_answers.json"
 
 
+def _first_line(question: str) -> str:
+    """LinkedIn repeats label text for screen readers ("Q?\\nQ?") - one copy."""
+    for line in question.splitlines():
+        if line.strip():
+            return line.strip()
+    return question.strip()
+
+
 def _normalize(question: str) -> str:
     """Key questions loosely so the same question phrased with different
     whitespace, casing or a trailing required-marker still matches."""
-    cleaned = question.replace("*", " ").replace("\n", " ").strip().lower()
+    cleaned = _first_line(question).replace("*", " ").strip().lower()
     return " ".join(cleaned.split())
 
 
@@ -81,7 +89,7 @@ def record_pending(
         if label and label not in seen_on:
             seen_on.append(label)
         data["pending"][key] = {
-            "question": question.replace("*", "").strip(),
+            "question": _first_line(question).replace("*", "").strip(),
             "options": options or existing.get("options") or [],
             "required": required or existing.get("required", False),
             "seen_on": seen_on,

@@ -211,6 +211,12 @@ def get_active_automator() -> BrowserAutomator | None:
     return ACTIVE_AUTOMATOR
 
 
+def _as_words(text: str) -> str:
+    """'phoneNumber-national_number' -> 'phone number national number'."""
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    return re.sub(r"[_\-.:/]+", " ", text).lower()
+
+
 def agent_frame_path(agent_id: str) -> Path:
     return get_project_root() / "data" / "live" / f"{agent_id}.png"
 
@@ -1032,119 +1038,67 @@ class BrowserAutomator:
                 except Exception:
                     pass
 
-                descriptor = f"{name_attr} {id_attr} {placeholder} {aria_label} {data_auto} {autocomplete} {label_text}"
+                descriptor = _as_words(
+                    f"{name_attr} {id_attr} {placeholder} {aria_label} {data_auto} {autocomplete} {label_text}"
+                )
 
-                # Skip if already has substantial content and not cover letter
+                def has(*words: str) -> bool:
+                    return any(re.search(rf"\b{re.escape(w)}\b", descriptor) for w in words)
+
+                # These rules are for short profile fields. A real question
+                # ("Please note our salary package...") goes to the question
+                # solver - matching words inside it filled salary boxes with
+                # the cover letter and "tell us..." fields with a phone number.
+                label = self._get_question_label(el)
+                if "?" in label or len(label.split()) > 6:
+                    continue
+
+                is_cover = has("cover letter", "coverletter", "motivation letter",
+                               "additional information", "additional info", "comments")
                 current_val = el.input_value() or ""
-                if (
-                    len(current_val) > 2
-                    and "cover" not in descriptor
-                    and "letter" not in descriptor
-                ):
+                if len(current_val) > 2 and not is_cover:
+                    # Typed-but-never-picked typeahead text still fails validation.
+                    self._pick_typeahead_suggestion(el, current_val)
                     continue
 
                 val = None
                 field_name = None
-
-                # Match field patterns
-                if any(
-                    w in descriptor
-                    for w in [
-                        "first_name",
-                        "firstname",
-                        "first name",
-                        "given_name",
-                        "given-name",
-                        "forename",
-                    ]
+                if has("first name", "firstname", "given name", "forename"):
+                    val, field_name = self.profile.first_name, "First Name"
+                elif has("last name", "lastname", "family name", "surname"):
+                    val, field_name = self.profile.last_name, "Last Name"
+                elif has("full name", "fullname", "your name") or (
+                    has("name") and not has("company", "user", "username", "file",
+                                            "org", "organization", "school", "manager", "reference")
                 ):
-                    val = self.profile.first_name
-                    field_name = "First Name"
-                elif any(
-                    w in descriptor
-                    for w in [
-                        "last_name",
-                        "lastname",
-                        "last name",
-                        "family_name",
-                        "family-name",
-                        "surname",
-                    ]
-                ):
-                    val = self.profile.last_name
-                    field_name = "Last Name"
-                elif any(
-                    w in descriptor
-                    for w in [
-                        "full_name",
-                        "fullname",
-                        "full name",
-                        "applicant_name",
-                        "candidate_name",
-                    ]
-                ) or (
-                    "name" in descriptor
-                    and not any(
-                        w in descriptor
-                        for w in ["company", "user", "file", "org", "school"]
-                    )
-                ):
-                    val = self.profile.full_name
-                    field_name = "Full Name"
-                elif any(w in descriptor for w in ["email", "e-mail"]):
-                    val = self.profile.email
-                    field_name = "Email"
-                elif any(w in descriptor for w in ["phone", "mobile", "tel", "cell"]):
-                    val = self.profile.phone
-                    field_name = "Phone"
-                elif "linkedin" in descriptor:
-                    val = self.profile.linkedin_url
-                    field_name = "LinkedIn"
-                elif "github" in descriptor:
-                    val = self.profile.github_url
-                    field_name = "GitHub"
-                elif any(w in descriptor for w in ["website", "portfolio", "blog"]):
-                    val = self.profile.portfolio_url or self.profile.github_url
-                    field_name = "Portfolio / Website"
-                elif any(w in descriptor for w in ["city", "town"]):
-                    val = self.profile.city
-                    field_name = "City"
-                elif any(w in descriptor for w in ["address", "street"]):
-                    val = self.profile.address
-                    field_name = "Address"
-                elif any(w in descriptor for w in ["postal", "zip"]):
-                    val = self.profile.postal_code
-                    field_name = "Postal Code"
-                elif any(
-                    w in descriptor
-                    for w in ["company", "employer", "organization", "org"]
-                ):
-                    val = self.profile.current_company
-                    field_name = "Current Company"
-                elif any(
-                    w in descriptor
-                    for w in ["title", "role", "designation", "headline"]
-                ):
-                    val = self.profile.current_title
-                    field_name = "Current Title"
-                elif any(
-                    w in descriptor
-                    for w in [
-                        "cover",
-                        "letter",
-                        "additional_info",
-                        "comments",
-                        "why us",
-                        "note",
-                    ]
-                ):
-                    if cover_letter_text:
-                        val = cover_letter_text
-                        field_name = "Cover Letter"
-                        report["cover_letter_filled"] = True
+                    val, field_name = self.profile.full_name, "Full Name"
+                elif has("email", "e mail"):
+                    val, field_name = self.profile.email, "Email"
+                elif has("phone", "mobile", "tel", "telephone", "cell", "cellphone"):
+                    val, field_name = self.profile.phone, "Phone"
+                elif has("linkedin"):
+                    val, field_name = self.profile.linkedin_url, "LinkedIn"
+                elif has("github"):
+                    val, field_name = self.profile.github_url, "GitHub"
+                elif has("website", "portfolio", "blog"):
+                    val, field_name = self.profile.portfolio_url or self.profile.github_url, "Portfolio / Website"
+                elif has("city", "town"):
+                    val, field_name = self.profile.city, "City"
+                elif has("address", "street"):
+                    val, field_name = self.profile.address, "Address"
+                elif has("postal", "zip", "pin code", "pincode"):
+                    val, field_name = self.profile.postal_code, "Postal Code"
+                elif has("company", "employer", "organization", "org"):
+                    val, field_name = self.profile.current_company, "Current Company"
+                elif has("title", "role", "designation", "headline"):
+                    val, field_name = self.profile.current_title, "Current Title"
+                elif is_cover and cover_letter_text:
+                    val, field_name = cover_letter_text, "Cover Letter"
+                    report["cover_letter_filled"] = True
 
                 if val and field_name:
                     el.fill(val)
+                    self._pick_typeahead_suggestion(el, val)
                     self._highlight_element(el)
                     report["fields_filled"].append(field_name)
 
@@ -1213,8 +1167,9 @@ class BrowserAutomator:
                     continue
 
                 val = el.input_value() or ""
-                if val.strip():
-                    continue  # Already filled
+                invalid = el.get_attribute("aria-invalid") == "true"
+                if val.strip() and not invalid:
+                    continue  # already answered, and the site accepted it
 
                 label_text = self._get_element_descriptor(el)
                 if len(label_text.strip()) > 5:
@@ -1225,6 +1180,7 @@ class BrowserAutomator:
                     )
                     if answer:
                         el.fill(answer)
+                        self._pick_typeahead_suggestion(el, answer)
                         self._highlight_element(el)
                         report["questions_answered"].append(
                             {"question": label_text[:50], "answer": answer}
@@ -1374,6 +1330,36 @@ class BrowserAutomator:
             }""")
         except Exception:
             return ""
+
+    def _pick_typeahead_suggestion(self, el: Any, text: str) -> None:
+        """Typeahead fields (LinkedIn's "Location (city)") only accept a value
+        picked from their suggestion list - typed text alone is rejected."""
+        try:
+            if el.get_attribute("role") != "combobox" and not el.get_attribute("aria-autocomplete"):
+                return
+            el.click()
+            el.fill("")
+            # Typing key by key is what fires the suggestion lookup.
+            el.press_sequentially(text, delay=60)
+            options = self._form_root().locator(
+                "[role='option'], .search-typeahead-v2__hit, [data-test-single-typeahead-entity-form-search-result]"
+            )
+            try:
+                options.first.wait_for(state="visible", timeout=5000)
+            except Exception:
+                # Some sites render the list outside the form.
+                options = self.page.locator("[role='listbox'] [role='option']")
+                options.first.wait_for(state="visible", timeout=2000)
+            wanted = text.lower()
+            for i in range(min(options.count(), 8)):
+                if wanted in (options.nth(i).inner_text() or "").lower():
+                    options.nth(i).click()
+                    return
+            # "Bangalore" is listed as "Bengaluru, Karnataka, India" - the top
+            # suggestion for what we typed is the right one.
+            options.first.click()
+        except Exception:
+            pass
 
     def _get_question_label(self, el: Any) -> str:
         """Human-readable question text for an input, without the element
@@ -1792,7 +1778,12 @@ class BrowserAutomator:
                         empty = !(el.value || '').trim();
                     }
                     if (!empty) continue;
-                    const label = (lbl || aria || '').trim();
+                    // A radio's own label is its option ("Yes"); the question
+                    // is the group's legend.
+                    const fs = el.closest('fieldset');
+                    const legend = fs && fs.querySelector('legend') ? fs.querySelector('legend').innerText : '';
+                    const question = (type === 'radio' || type === 'checkbox') && legend ? legend : lbl;
+                    const label = (question || aria || '').trim();
                     if (!label) continue;
                     if (!out.some(o => o.label === label)) {
                         out.push({ label: label.slice(0, 160), type: type });
@@ -1805,11 +1796,36 @@ class BrowserAutomator:
         except Exception:
             return []
 
+    def _click_next(self, selectors: list[str], step: int) -> bool:
+        for sel in selectors:
+            try:
+                # Inside the popup only - a page-wide "Next" also matches
+                # carousel arrows and pagination on the job page itself.
+                matches = self._form_root().locator(sel)
+                for i in range(min(matches.count(), 5)):
+                    btn = matches.nth(i)
+                    if btn.is_visible(timeout=800):
+                        self._notify(
+                            "form_detection",
+                            f"Advancing to wizard step {step + 2} via '{sel}'...",
+                        )
+                        btn.click()
+                        time.sleep(2)
+                        return True
+            except Exception:
+                continue
+        return False
+
     def _form_fingerprint(self) -> str:
-        """Snapshot of the current wizard step's visible text, used to tell a
-        real step change from a click that got rejected by validation."""
+        """The step's field labels and headings - they change when the step
+        does, but not when an error message appears on a rejected Next."""
         try:
-            return (self._form_root().inner_text() or "")[:2000]
+            return self._form_root().evaluate(
+                "root => Array.from(root.querySelectorAll('label, legend, h3'))"
+                ".map(e => e.innerText.trim()).join('|') + '#' + Array.from("
+                "root.querySelectorAll('progress, [aria-valuenow]'))"
+                ".map(e => e.value || e.getAttribute('aria-valuenow')).join(',')"
+            ) or ""
         except Exception:
             return ""
 
@@ -1879,30 +1895,14 @@ class BrowserAutomator:
             combined["needs_review"].extend(step_report.get("needs_review", []))
 
             before = self._form_fingerprint()
-            advanced = False
-            for sel in next_selectors:
-                try:
-                    # Inside the popup only - a page-wide "Next" also matches
-                    # carousel arrows and pagination on the job page itself.
-                    matches = self._form_root().locator(sel)
-                    match_count = min(matches.count(), 5)
-                    for i in range(match_count):
-                        btn = matches.nth(i)
-                        if btn.is_visible(timeout=800):
-                            self._notify(
-                                "form_detection",
-                                f"Advancing to wizard step {step + 2} via '{sel}'...",
-                            )
-                            btn.click()
-                            time.sleep(2)
-                            advanced = True
-                            break
-                    if advanced:
-                        break
-                except Exception:
-                    continue
-            if not advanced:
+            if not self._click_next(next_selectors, step):
                 break
+
+            if before and self._form_fingerprint() == before:
+                # Next marks the rejected fields invalid - answer those again
+                # (a restored draft can hold a wrong value) and retry once.
+                self.fill_application_form(app_dir, job_title, company)
+                self._click_next(next_selectors, step)
 
             # Clicking Next doesn't mean the step actually moved: LinkedIn
             # keeps you on the same step and shows an inline error when a

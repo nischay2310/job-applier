@@ -28,7 +28,12 @@ from job_applier.automation.browser_automator import (  # type: ignore[import-no
     agent_frame_path,
     verify_linkedin_session,
 )
-from job_applier.chrome_launcher import activate_target, ensure_chrome
+from job_applier.chrome_launcher import (
+    activate_target,
+    cdp_ready,
+    close_idle_windows,
+    ensure_chrome,
+)
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
     load_candidate_profile,
     save_candidate_profile,
@@ -1226,6 +1231,22 @@ def focus_agent(agent_id: str) -> dict[str, str]:
     if not activate_target(target_id):
         raise HTTPException(status_code=502, detail="Chrome didn't respond")
     return {"status": "success"}
+
+
+@app.post("/api/agents/close-idle")
+def close_idle_agent_windows() -> dict[str, Any]:
+    """Closes automation Chrome windows left behind by finished or crashed runs."""
+    with AGENTS_LOCK:
+        busy = {a["target_id"] for a in AGENTS.values() if a.get("target_id")}
+    closed = close_idle_windows(busy)
+    return {"status": "success", "closed": closed}
+
+
+@app.on_event("startup")
+def _close_leftover_windows() -> None:
+    # Nothing is running yet, so every open automation window is a leftover.
+    if cdp_ready():
+        close_idle_windows(set())
 
 
 @app.post("/api/chrome/connect")
