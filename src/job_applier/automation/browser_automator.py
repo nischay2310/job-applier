@@ -282,6 +282,9 @@ class BrowserAutomator:
         self.last_apply_kind: str | None = None
         self.agent_id = uuid.uuid4().hex[:8]
         self.target_id: str | None = None
+        self.last_job_inactive = ""
+        self.last_excluded = ""
+        self._last_frame_at = 0.0
 
         self.playwright: Any = None
         self.browser: Any = None
@@ -298,20 +301,31 @@ class BrowserAutomator:
         """Dispatches structured log event, captures a live-view screenshot,
         and triggers the live status callback."""
         log_event(message, level=level, category="Auto-Apply")
-        if self.page is not None:
-            try:
-                frame = agent_frame_path(self.agent_id)
-                frame.parent.mkdir(parents=True, exist_ok=True)
-                self.page.screenshot(path=str(frame))
-                shutil.copyfile(frame, get_project_root() / "data" / "live_view.png")
-            except Exception:
-                pass
+        self._capture_frame()
         self._update_agent(step=step, message=message, level=level)
         if self.status_callback:
             try:
                 self.status_callback(step, message, level, details or {})
             except Exception as cb_err:
                 print(f"Notice in status callback: {cb_err}")
+
+    def _capture_frame(self, min_gap: float = 1.5) -> None:
+        """Snapshot for the dashboard: the open dialog only, at most one every
+        min_gap seconds. Photographing the whole page on every status update
+        was a large part of each application's time."""
+        if self.page is None or time.monotonic() - self._last_frame_at < min_gap:
+            return
+        self._last_frame_at = time.monotonic()
+        try:
+            frame = agent_frame_path(self.agent_id)
+            frame.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self._form_root().screenshot(path=str(frame), timeout=3000)
+            except Exception:
+                self.page.screenshot(path=str(frame), timeout=5000)
+            shutil.copyfile(frame, get_project_root() / "data" / "live_view.png")
+        except Exception:
+            pass
 
     def _update_agent(self, **fields: Any) -> None:
         now = time.strftime("%H:%M:%S")
@@ -555,6 +569,8 @@ class BrowserAutomator:
         if not self.page:
             self.start()
         self.last_apply_kind = None
+        self.last_job_inactive = ""
+        self.last_excluded = ""
 
         if is_excluded_application_url(job_url):
             self._notify(
@@ -589,6 +605,7 @@ class BrowserAutomator:
             active_ok, active_reason = is_job_active(job_url, html=page_html)
             if not active_ok:
                 print(f"⚠️ Page indicates job is not active: {active_reason}")
+                self.last_job_inactive = active_reason
                 self._notify(
                     "job_expired",
                     f"Job posting is inactive: {active_reason}",
@@ -681,6 +698,13 @@ class BrowserAutomator:
                         break
                 except Exception:
                     continue
+
+        # Apply can hand off to a platform we don't handle - the job URL looked
+        # fine, the destination doesn't.
+        if is_excluded_application_url(self.page.url):
+            self.last_excluded = f"Application continues on {self.detect_platform(self.page.url)}"
+            self._notify("skipped", self.last_excluded, level="WARN")
+            return False
 
         return True
 
@@ -1100,6 +1124,10 @@ class BrowserAutomator:
                 if len(current_val) > 2 and not is_cover:
                     # Typed-but-never-picked typeahead text still fails validation.
                     self._pick_typeahead_suggestion(el, current_val)
+                    continue
+
+                # Middle name is left empty - it's optional and not ours to invent.
+                if has("middle name", "middlename", "middle initial"):
                     continue
 
                 val = None
@@ -1896,7 +1924,7 @@ class BrowserAutomator:
         except Exception:
             return []
 
-    def _click_next(self, selectors: list[str], step: int) -> bool:
+    def _click_next(self, selectors: list[str], step: int, before: str = "") -> bool:
         for sel in selectors:
             try:
                 # Inside the popup only - a page-wide "Next" also matches
@@ -1904,13 +1932,19 @@ class BrowserAutomator:
                 matches = self._form_root().locator(sel)
                 for i in range(min(matches.count(), 5)):
                     btn = matches.nth(i)
-                    if btn.is_visible(timeout=800):
+                    if btn.is_visible(timeout=500):
                         self._notify(
                             "form_detection",
                             f"Advancing to wizard step {step + 2} via '{sel}'...",
                         )
                         btn.click()
-                        time.sleep(2)
+                        # Continue as soon as the step changes instead of
+                        # always waiting out a fixed pause.
+                        deadline = time.monotonic() + 3
+                        while time.monotonic() < deadline:
+                            time.sleep(0.2)
+                            if not before or self._form_fingerprint() != before:
+                                break
                         return True
             except Exception:
                 continue
@@ -1995,14 +2029,14 @@ class BrowserAutomator:
             combined["needs_review"].extend(step_report.get("needs_review", []))
 
             before = self._form_fingerprint()
-            if not self._click_next(next_selectors, step):
+            if not self._click_next(next_selectors, step, before):
                 break
 
             if before and self._form_fingerprint() == before:
                 # Next marks the rejected fields invalid - answer those again
                 # (a restored draft can hold a wrong value) and retry once.
                 self.fill_application_form(app_dir, job_title, company)
-                self._click_next(next_selectors, step)
+                self._click_next(next_selectors, step, before)
 
             # Clicking Next doesn't mean the step actually moved: LinkedIn
             # keeps you on the same step and shows an inline error when a
@@ -2054,6 +2088,10 @@ class BrowserAutomator:
         success = self.navigate_and_open_form(job_url)
         self._record_apply_kind(app_dir)
         if not success:
+            if self.last_job_inactive:
+                return "expired", self.last_job_inactive
+            if self.last_excluded:
+                return "excluded", self.last_excluded
             return "failed", "Could not navigate to job URL"
 
         report = self._advance_multistep_form(
@@ -2225,6 +2263,10 @@ class BrowserAutomator:
         success = self.navigate_and_open_form(job_url)
         self._record_apply_kind(app_dir)
         if not success:
+            if self.last_job_inactive:
+                return "expired", self.last_job_inactive
+            if self.last_excluded:
+                return "excluded", self.last_excluded
             return "failed", "Could not navigate to job URL"
 
         report = self._advance_multistep_form(

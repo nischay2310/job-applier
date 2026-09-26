@@ -81,6 +81,13 @@ app.add_middleware(
 project_root = get_project_root()
 output_apps_dir = project_root / "output" / "applications"
 output_applied_dir = project_root / "output" / "applied"
+output_expired_dir = project_root / "output" / "expired"
+output_excluded_dir = project_root / "output" / "excluded"
+QUEUE_EXITS = {
+    "applied": output_applied_dir,
+    "expired": output_expired_dir,
+    "excluded": output_excluded_dir,
+}
 output_apps_dir.mkdir(parents=True, exist_ok=True)
 output_applied_dir.mkdir(parents=True, exist_ok=True)
 
@@ -796,10 +803,11 @@ def run_auto_apply_for_job(
                     non_interactive=True,
                 )
 
-            if status == "applied":
-                target_dir = output_applied_dir / app_folder.name
+            if status in ("applied", "expired", "excluded"):
+                target_base = QUEUE_EXITS[status]
+                target_base.mkdir(parents=True, exist_ok=True)
                 try:
-                    shutil.move(str(app_folder), str(target_dir))
+                    shutil.move(str(app_folder), str(target_base / app_folder.name))
                 except Exception as e:
                     print(f"Notice moving folder: {e}")
 
@@ -1530,10 +1538,8 @@ def batch_apply(
                     if not info["job_url"].startswith("http"):
                         continue
                     if idx > 0:
-                        # Space applies out like a human browsing, not a
-                        # script firing every ~10s - that pace is what
-                        # tripped LinkedIn's bot detection last run.
-                        pause = random.uniform(25, 70)
+                        # A short, uneven gap between applications.
+                        pause = random.uniform(8, 18)
                         set_automation_hud(
                             is_active=True,
                             company=info["company"],
@@ -1561,10 +1567,14 @@ def batch_apply(
                             non_interactive=True,
                         )
 
-                    if status == "applied":
-                        target = output_applied_dir / f.name
+                    if status in ("applied", "expired", "excluded"):
+                        # Closed postings and ones that hand off to a platform
+                        # we don't handle leave the queue - retrying them is
+                        # wasted time.
+                        target_base = QUEUE_EXITS[status]
+                        target_base.mkdir(parents=True, exist_ok=True)
                         try:
-                            shutil.move(str(f), str(target))
+                            shutil.move(str(f), str(target_base / f.name))
                         except Exception:
                             pass
 
