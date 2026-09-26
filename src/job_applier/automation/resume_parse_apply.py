@@ -7,7 +7,9 @@ from typing import Any
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     record_pending,
 )
-from job_applier.utils import get_project_root
+from job_applier.automation.browser_automator import (  # type: ignore[import-not-found]
+    candidate_resume_path,
+)
 
 
 class ResumeParseApplyHandler:
@@ -34,9 +36,9 @@ class ResumeParseApplyHandler:
         return self.automator._form_root()
 
     def _resume_path(self, app_dir: Path) -> Path | None:
-        default_resume = get_project_root() / "data" / "default_resume.pdf"
-        if default_resume.exists():
-            return default_resume
+        own_resume = candidate_resume_path()
+        if own_resume:
+            return own_resume
         return next(app_dir.glob("CV_*.pdf"), None)
 
     def upload_resume(self, app_dir: Path) -> bool:

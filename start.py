@@ -138,8 +138,8 @@ def main() -> None:
 
     os.chdir(ROOT)
     install_dependencies()
-    if not (ROOT / "data" / "default_resume.pdf").exists():
-        say("Note: data/default_resume.pdf is missing - LinkedIn applies will use a generated CV.")
+    if not list((ROOT / "data").glob("*.pdf")):
+        say("Note: no resume PDF in data/ - LinkedIn applies will use a generated CV.")
     if not args.no_chrome:
         start_chrome()
     run_dashboard(args.port, args.reload)

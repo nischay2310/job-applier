@@ -45,6 +45,11 @@ from job_applier.utils import get_project_root
 
 IN_DOCKER = os.path.exists("/.dockerenv")
 
+SUGGESTION_SELECTOR = (
+    "[role='option'], .search-typeahead-v2__hit, "
+    "[data-test-single-typeahead-entity-form-search-result]"
+)
+
 # "Select an option", "-- Choose --" and friends aren't real answers.
 PLACEHOLDER_OPTION = re.compile(r"^\s*(select|choose|please select|pick|-{2,}|—)", re.I)
 HOST_CHROME_HOSTNAME = os.environ.get(
@@ -215,6 +220,16 @@ def _as_words(text: str) -> str:
     """'phoneNumber-national_number' -> 'phone number national number'."""
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     return re.sub(r"[_\-.:/]+", " ", text).lower()
+
+
+def candidate_resume_path() -> Path | None:
+    """The candidate's own resume PDF in data/. Its filename is what shows up
+    on the account, so it stays as they named it."""
+    folder = get_project_root() / "data"
+    override = os.environ.get("RESUME_PATH")
+    if override and Path(override).exists():
+        return Path(override)
+    return next(iter(sorted(folder.glob("*.pdf"))), None)
 
 
 def agent_frame_path(agent_id: str) -> Path:
@@ -901,9 +916,9 @@ class BrowserAutomator:
         # 1. Locate CV PDF and Cover Letter. On LinkedIn, always use the
         # candidate's real named resume rather than the per-job generated
         # one - the generated CV is only a tailoring fallback.
-        default_resume = get_project_root() / "data" / "default_resume.pdf"
-        if platform == "LinkedIn" and default_resume.exists():
-            cv_pdf = default_resume
+        own_resume = candidate_resume_path()
+        if platform == "LinkedIn" and own_resume:
+            cv_pdf = own_resume
         else:
             cv_pdf = next(app_dir.glob("CV_*.pdf"), None)
         cover_letter_file = app_dir / "cover_letter.txt"
@@ -985,16 +1000,40 @@ class BrowserAutomator:
 
         return report
 
+    def _use_existing_resume(self, name: str) -> bool:
+        """Picks a resume already saved on the account.
+
+        LinkedIn keeps every uploaded file, so uploading on each application
+        fills the profile with copies of the same CV.
+        """
+        try:
+            root = self._form_root()
+            if root.locator(f"[aria-label*='Deselect resume {name}']").count():
+                return True  # already the chosen one
+            for selector in (
+                f"[aria-label*='Select resume {name}']",
+                f"label:has-text('{name}')",
+            ):
+                option = root.locator(selector)
+                for i in range(min(option.count(), 5)):
+                    if option.nth(i).is_visible(timeout=500):
+                        option.nth(i).click()
+                        time.sleep(1)
+                        return True
+        except Exception:
+            pass
+        return False
+
     def _upload_resume(self, cv_path: str) -> bool:
-        """Uploads the tailored CV PDF to file inputs."""
+        """Attaches the CV, reusing the copy already on the account."""
+        name = Path(cv_path).name
+        if self._use_existing_resume(name):
+            print(f" Using the resume already on the account: {name}")
+            return True
         try:
             file_inputs = self._form_root().locator("input[type=file]")
-            count = file_inputs.count()
-            if count > 0:
-                print(
-                    f" Found {count} file input(s). Attaching resume: {Path(cv_path).name}"
-                )
-                # Target the first file input (typically resume/CV)
+            if file_inputs.count() > 0:
+                print(f" Uploading resume: {name}")
                 file_inputs.first.set_input_files(cv_path)
                 time.sleep(1)
                 return True
@@ -1015,6 +1054,8 @@ class BrowserAutomator:
             try:
                 el = inputs.nth(i)
                 if not el.is_visible():
+                    continue
+                if self._is_search_box(el):
                     continue
 
                 # Get element metadata
@@ -1116,6 +1157,8 @@ class BrowserAutomator:
                 el = selects.nth(i)
                 if not el.is_visible():
                     continue
+                if self._is_search_box(el):
+                    continue
 
                 options = [o.strip() for o in el.locator("option").all_inner_texts()]
                 choices = [o for o in options if o and not PLACEHOLDER_OPTION.match(o)]
@@ -1164,6 +1207,8 @@ class BrowserAutomator:
             try:
                 el = unfilled_inputs.nth(i)
                 if not el.is_visible():
+                    continue
+                if self._is_search_box(el):
                     continue
 
                 val = el.input_value() or ""
@@ -1317,6 +1362,21 @@ class BrowserAutomator:
         except Exception:
             pass
 
+    def _is_search_box(self, el: Any) -> bool:
+        """A site's search box is not an application question - it only gets
+        in the way on ATS pages, which have no form popup to scope to."""
+        try:
+            return bool(el.evaluate("""el => {
+                const type = (el.getAttribute('type') || '').toLowerCase();
+                const role = (el.getAttribute('role') || '').toLowerCase();
+                const text = ((el.labels && el.labels[0] ? el.labels[0].innerText : '') + ' '
+                    + (el.getAttribute('aria-label') || '') + ' ' + (el.placeholder || '')
+                    + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+                return type === 'search' || role === 'searchbox' || /\\bsearch\\b/.test(text);
+            }"""))
+        except Exception:
+            return False
+
     def _get_element_descriptor(self, el: Any) -> str:
         """Extracts text, label, aria, and id descriptor for an element."""
         try:
@@ -1331,33 +1391,71 @@ class BrowserAutomator:
         except Exception:
             return ""
 
+    def _suggestion_list(self) -> Any:
+        """The typeahead's suggestions, wherever the site renders them."""
+        inside = self._form_root().locator(SUGGESTION_SELECTOR)
+        try:
+            if inside.count():
+                return inside
+        except Exception:
+            pass
+        return self.page.locator("[role='listbox'] [role='option'], .pac-item")
+
+    def _wait_for_suggestions(self, timeout: float = 4000) -> Any | None:
+        try:
+            options = self._suggestion_list()
+            options.first.wait_for(state="visible", timeout=timeout)
+            return options if options.count() else None
+        except Exception:
+            return None
+
     def _pick_typeahead_suggestion(self, el: Any, text: str) -> None:
         """Typeahead fields (LinkedIn's "Location (city)") only accept a value
-        picked from their suggestion list - typed text alone is rejected."""
+        chosen from their list; typed text alone is rejected.
+
+        The list answers real keystrokes and sometimes doesn't come at all, so
+        this retries with a shorter query and falls back to the keyboard. The
+        original value goes back if nothing could be chosen - better a typed
+        value than an empty required field.
+        """
         try:
             if el.get_attribute("role") != "combobox" and not el.get_attribute("aria-autocomplete"):
                 return
-            el.click()
-            el.fill("")
-            # Typing key by key is what fires the suggestion lookup.
-            el.press_sequentially(text, delay=60)
-            options = self._form_root().locator(
-                "[role='option'], .search-typeahead-v2__hit, [data-test-single-typeahead-entity-form-search-result]"
-            )
+        except Exception:
+            return
+
+        original = (el.input_value() or "").strip() or text
+        # Full text first, then a prefix: a stale or too-specific query
+        # ("Bengaluru, Karnataka, India") often returns nothing.
+        queries = [text, text.split(",")[0].strip()]
+        if len(text) > 5:
+            queries.append(text[:5])
+
+        for query in dict.fromkeys(q for q in queries if q):
             try:
-                options.first.wait_for(state="visible", timeout=5000)
-            except Exception:
-                # Some sites render the list outside the form.
-                options = self.page.locator("[role='listbox'] [role='option']")
-                options.first.wait_for(state="visible", timeout=2000)
-            wanted = text.lower()
-            for i in range(min(options.count(), 8)):
-                if wanted in (options.nth(i).inner_text() or "").lower():
-                    options.nth(i).click()
+                el.click()
+                el.press("Control+a")
+                el.press("Backspace")
+                # Typing key by key is what fires the lookup.
+                el.press_sequentially(query, delay=60)
+                options = self._wait_for_suggestions()
+                if options is None:
+                    continue
+
+                options.first.click()
+                time.sleep(0.5)
+                if (el.input_value() or "").strip():
                     return
-            # "Bangalore" is listed as "Bengaluru, Karnataka, India" - the top
-            # suggestion for what we typed is the right one.
-            options.first.click()
+            except Exception:
+                continue
+
+        try:  # last resort: let the field's own keyboard handling choose
+            el.click()
+            el.press("ArrowDown")
+            el.press("Enter")
+            time.sleep(0.3)
+            if not (el.input_value() or "").strip():
+                el.fill(original)
         except Exception:
             pass
 
@@ -1764,6 +1862,8 @@ class BrowserAutomator:
                     const type = (el.getAttribute('type') || el.tagName).toLowerCase();
                     const lbl = el.labels && el.labels[0] ? el.labels[0].innerText : '';
                     const aria = el.getAttribute('aria-label') || '';
+                    // A site search box is not an application question.
+                    if (type === 'search' || /\\bsearch\\b/i.test(lbl + ' ' + aria + ' ' + (el.name || '') + ' ' + (el.id || ''))) continue;
                     const required = el.required
                         || el.getAttribute('aria-required') === 'true'
                         || /\\*/.test(lbl);
