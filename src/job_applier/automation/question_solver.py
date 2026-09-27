@@ -35,7 +35,7 @@ class QuestionSolver:
         # 1a. Answers the candidate has already supplied for this question
         # (from the Tracker page) always win - that's the whole point of
         # asking them once and reusing it everywhere.
-        stored = get_answer(question_text)
+        stored = get_answer(question_text, options)
         if stored:
             return self._match_to_options(stored, options)
 

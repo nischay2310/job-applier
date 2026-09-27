@@ -28,7 +28,7 @@ from job_applier.automation.cloudflare import (  # type: ignore[import-not-found
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     record_pending,
 )
-from job_applier.chrome_launcher import cdp_ready, ensure_chrome
+from job_applier.chrome_launcher import cdp_ready, close_target, ensure_chrome
 from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
     QuestionSolver,
 )
@@ -209,6 +209,23 @@ ACTIVE_AUTOMATOR: BrowserAutomator | None = None
 # Every automation that's running right now, for the dashboard's live view.
 AGENTS: dict[str, dict[str, Any]] = {}
 AGENTS_LOCK = threading.Lock()
+# Agents the dashboard has asked to stop. Killing the thread outright would
+# leave a half-filled form and a claimed job behind, so the automation checks
+# this at each step and bows out cleanly instead.
+ABORT_REQUESTS: set[str] = set()
+
+
+class AgentAborted(RuntimeError):
+    """Raised inside an automation when its job was cancelled from the UI."""
+
+
+def request_abort(agent_id: str) -> bool:
+    """Asks a running agent to stop at its next step."""
+    with AGENTS_LOCK:
+        if agent_id not in AGENTS:
+            return False
+        ABORT_REQUESTS.add(agent_id)
+    return True
 
 
 def get_active_automator() -> BrowserAutomator | None:
@@ -282,6 +299,9 @@ class BrowserAutomator:
         self.last_apply_kind: str | None = None
         self.agent_id = uuid.uuid4().hex[:8]
         self.target_id: str | None = None
+        # Tabs this run opened. Only these get closed when it ends - the
+        # automation Chrome's own tabs (and your session with them) stay put.
+        self._own_pages: list[Any] = []
         self.last_job_inactive = ""
         self.last_excluded = ""
         self._last_frame_at = 0.0
@@ -319,9 +339,24 @@ class BrowserAutomator:
         try:
             frame = agent_frame_path(self.agent_id)
             frame.parent.mkdir(parents=True, exist_ok=True)
+            # Clip to the dialog rather than screenshotting the element: taking
+            # an element's picture scrolls it into view, which drags the whole
+            # page around while an application is being filled.
+            clip = None
             try:
-                self._form_root().screenshot(path=str(frame), timeout=3000)
+                box = self._form_root().bounding_box(timeout=1000)
+                view = self.page.viewport_size or {"width": 1280, "height": 900}
+                if box:
+                    x, y = max(0.0, box["x"]), max(0.0, box["y"])
+                    width = min(box["width"], view["width"] - x)
+                    height = min(box["height"], view["height"] - y)
+                    if width > 50 and height > 50:
+                        clip = {"x": x, "y": y, "width": width, "height": height}
             except Exception:
+                pass
+            if clip:
+                self.page.screenshot(path=str(frame), clip=clip, timeout=5000)
+            else:
                 self.page.screenshot(path=str(frame), timeout=5000)
             shutil.copyfile(frame, get_project_root() / "data" / "live_view.png")
         except Exception:
@@ -329,6 +364,14 @@ class BrowserAutomator:
 
     def _update_agent(self, **fields: Any) -> None:
         now = time.strftime("%H:%M:%S")
+        # Every step reports through here, which makes it the natural place to
+        # notice a cancellation and stop before touching the form again.
+        with AGENTS_LOCK:
+            aborting = self.agent_id in ABORT_REQUESTS
+        if aborting:
+            with AGENTS_LOCK:
+                ABORT_REQUESTS.discard(self.agent_id)
+            raise AgentAborted(f"Agent {self.agent_id} was stopped from the dashboard")
         with AGENTS_LOCK:
             agent = AGENTS.setdefault(
                 self.agent_id,
@@ -396,9 +439,11 @@ class BrowserAutomator:
                     "Target.createTarget", {"url": "about:blank", "newWindow": True}
                 )
             self.target_id = target["targetId"]
+            self._own_pages.append(new_page.value)
             return new_page.value
         except Exception:
             page = self.context.new_page()
+            self._own_pages.append(page)
             try:
                 info = self.context.new_cdp_session(page).send("Target.getTargetInfo")
                 self.target_id = info["targetInfo"]["targetId"]
@@ -513,13 +558,18 @@ class BrowserAutomator:
         """Closes browser and stops Playwright engine."""
         try:
             if self.using_host_chrome:
-                # Never tear down the user's own Chrome - only drop the tab
-                # this run opened, then detach.
-                if self.page:
+                # Never tear down the automation Chrome itself - close the
+                # tabs this run opened (including any the Apply button spawned)
+                # and its window, then detach. Anything left behind would sit
+                # there holding a logged-in LinkedIn page open for nothing.
+                for page in reversed(self._own_pages):
                     try:
-                        self.page.close()
+                        page.close()
                     except Exception:
                         pass
+                self._own_pages = []
+                if self.target_id:
+                    close_target(self.target_id)
                 if self.playwright:
                     self.playwright.stop()
                 return
@@ -664,6 +714,7 @@ class BrowserAutomator:
             self.page.locator(
                 "input[type=file], "
                 "[role='dialog'] input, [role='dialog'] textarea, [role='dialog'] select, "
+                "dialog input, dialog textarea, dialog select, "
                 ".jobs-easy-apply-modal"
             ).count()
             > 0
@@ -693,6 +744,7 @@ class BrowserAutomator:
                         # Check if a new tab was opened
                         if len(self.context.pages) > initial_pages_count:
                             self.page = self.context.pages[-1]
+                            self._own_pages.append(self.page)
                             self.page.bring_to_front()
                             time.sleep(2)
                         break
@@ -749,12 +801,13 @@ class BrowserAutomator:
         the global top-nav search box), typing garbage into unrelated site
         controls instead of the actual application form.
         """
-        # The Easy Apply modal specifically, then any other visible dialog -
-        # LinkedIn keeps unrelated hidden dialogs in the DOM, so "the first
-        # [role=dialog]" is often not the application form.
+        # The Easy Apply form first, then any other visible dialog - LinkedIn
+        # keeps unrelated hidden dialogs in the DOM, so "the first
+        # [role=dialog]" is often not the application form. Its newer UI uses
+        # a plain <dialog> with none of the old classes or roles.
         for sel in (
-            ".jobs-easy-apply-modal, [data-test-modal-id='easy-apply-modal']",
-            "[role='dialog']",
+            ".jobs-easy-apply-modal, [data-test-modal-id='easy-apply-modal'], dialog[open]",
+            "[role='dialog'], dialog",
         ):
             try:
                 candidates = self.page.locator(sel)
@@ -770,7 +823,7 @@ class BrowserAutomator:
         # LinkedIn's own chrome (top-nav search, feed composer). Hand back an
         # empty scope so callers find nothing rather than the wrong thing.
         if self.detect_platform(self.page.url) == "LinkedIn":
-            return self.page.locator("[role='dialog'], .jobs-easy-apply-modal")
+            return self.page.locator("[role='dialog'], dialog, .jobs-easy-apply-modal")
 
         # Other ATS (Greenhouse, Lever, Workday) render full-page forms.
         return self.page
@@ -2015,6 +2068,8 @@ class BrowserAutomator:
             "button[aria-label='Review your application']",
             "button:has-text('Next')",
             "button:has-text('Continue')",
+            # The newer UI labels the last step's button plainly.
+            "button:has-text('Review')",
         ]
         for step in range(max_steps):
             step_report = self.fill_application_form(app_dir, job_title, company)

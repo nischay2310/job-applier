@@ -189,6 +189,22 @@
                   @change="uploadBackupBundle($event)"
                 />
               </label>
+
+              <div class="h-4 w-px bg-slate-800"></div>
+
+              <button
+                @click="restartApp(true)"
+                :disabled="restartingApp"
+                class="px-3 py-1.5 bg-slate-950/70 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 hover:border-slate-700 rounded-xl text-xs font-medium flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
+                title="Safely restart the dashboard and the automation Chrome (waits for any application being submitted)"
+              >
+                <i
+                  data-lucide="rotate-ccw"
+                  class="w-3.5 h-3.5 text-sky-400"
+                  :class="restartingApp ? 'animate-spin' : ''"
+                ></i>
+                <span x-text="restartingApp ? 'Restarting...' : 'Restart'"></span>
+              </button>
             </div>
           </div>
         </div>
@@ -2077,12 +2093,13 @@
           </div>
           <div class="flex items-center gap-2">
             <button
-              @click="closeIdleWindows()"
-              class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5"
-              title="Close automation Chrome windows no running agent is using"
+              @click="restartApp(false)"
+              :disabled="restartingApp"
+              class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
+              title="Restart just the dashboard - the automation Chrome and its LinkedIn session stay up"
             >
-              <i data-lucide="x-square" class="w-3.5 h-3.5"></i>
-              <span>Close idle windows</span>
+              <i data-lucide="rotate-ccw" class="w-3.5 h-3.5" :class="restartingApp ? 'animate-spin' : ''"></i>
+              <span x-text="restartingApp ? 'Restarting...' : 'Restart dashboard'"></span>
             </button>
             <button
               @click="reconnectChrome()"
@@ -2120,14 +2137,50 @@
                       x-text="agent.message || agent.step"
                     ></p>
                   </div>
-                  <button
-                    @click="focusAgent(agent.id)"
-                    x-show="agent.target_id"
-                    class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-semibold whitespace-nowrap flex items-center gap-1"
-                    title="Bring this agent's Chrome window to the front"
-                  >
-                    <i data-lucide="external-link" class="w-3 h-3"></i> Show in Chrome
-                  </button>
+                  <div class="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      @click="focusAgent(agent.id)"
+                      x-show="agent.target_id"
+                      class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-semibold whitespace-nowrap flex items-center gap-1"
+                      title="Bring this agent's Chrome window to the front"
+                    >
+                      <i data-lucide="external-link" class="w-3 h-3"></i> Show in Chrome
+                    </button>
+                    <button
+                      @click="stopAgent(agent, false)"
+                      :disabled="!agent.can_restart"
+                      class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-[11px] font-semibold whitespace-nowrap flex items-center gap-1 disabled:opacity-40"
+                      title="Stop this job and put it back in the queue to try again"
+                    >
+                      <i data-lucide="rotate-ccw" class="w-3 h-3"></i> Restart job
+                    </button>
+                    <button
+                      @click="stopAgent(agent, true)"
+                      :disabled="!agent.can_restart"
+                      class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-lg text-[11px] font-semibold whitespace-nowrap flex items-center gap-1 disabled:opacity-40"
+                      title="Stop this job and close its Chrome window"
+                    >
+                      <i data-lucide="x-square" class="w-3 h-3"></i> Close window
+                    </button>
+                  </div>
+                </div>
+                <div
+                  x-show="agent.suggestion && agent.severity !== 'ok'"
+                  class="mx-4 mb-2.5 px-3 py-2 rounded-xl text-[11px] leading-relaxed border flex items-start gap-2"
+                  :class="agent.severity === 'ok' ? 'bg-slate-800/40 border-slate-700 text-slate-300'
+                    : agent.severity === 'busy' ? 'bg-sky-500/10 border-sky-500/30 text-sky-200'
+                    : agent.severity === 'slow' ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-200'"
+                >
+                  <i data-lucide="lightbulb" class="w-3.5 h-3.5 flex-shrink-0 mt-0.5"></i>
+                  <span>
+                    <span x-text="agent.suggestion"></span>
+                    <span
+                      x-show="agent.stalled_for > 30"
+                      class="opacity-70 font-mono"
+                      x-text="' (idle ' + agent.stalled_for + 's)'"
+                    ></span>
+                  </span>
                 </div>
                 <img
                   x-show="agent.has_frame"
@@ -2450,6 +2503,7 @@
           liveAgents: [],
           liveTick: 0,
           reconnectingChrome: false,
+          restartingApp: false,
           authModal: {
             open: false,
             platforms: {},
@@ -2650,13 +2704,54 @@
             }
           },
 
-          async closeIdleWindows() {
-            const res = await fetch("/api/agents/close-idle", { method: "POST" });
+          async stopAgent(agent, closeWindow) {
+            const what = closeWindow
+              ? `Stop ${agent.company || "this job"} and close its window?`
+              : `Stop ${agent.company || "this job"}? It goes back in the queue so you can apply again.`;
+            if (!confirm(what)) return;
+            const res = await fetch(
+              `/api/agents/${agent.id}/stop?close_window=${closeWindow}`,
+              { method: "POST" },
+            );
             const data = await res.json().catch(() => ({}));
             this.showToast(
-              res.ok ? `Closed ${data.closed} idle window(s)` : "Couldn't reach the automation Chrome",
+              res.ok ? data.message || "Stopping..." : data.detail || "Couldn't stop it",
               res.ok ? "success" : "error",
             );
+            this.refreshLiveView();
+          },
+
+          async restartApp(full = false) {
+            const what = full
+              ? "Restart the app and the automation Chrome? Applies in progress must finish first."
+              : "Restart the dashboard? Applies in progress must finish first.";
+            if (!confirm(what)) return;
+            this.restartingApp = true;
+            try {
+              const res = await fetch(`/api/app/restart?full=${full}`, { method: "POST" });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                this.showToast(data.detail || "Could not restart", "error");
+                return;
+              }
+              this.showToast("Restarting...", "info");
+              for (let i = 0; i < 75; i++) {
+                await new Promise((r) => setTimeout(r, 1000));
+                try {
+                  const ok = await fetch("/api/health");
+                  if (ok.ok) {
+                    this.showToast("Back up - reloading the page.");
+                    location.reload();
+                    return;
+                  }
+                } catch (e) {
+                  /* still down */
+                }
+              }
+              this.showToast("It didn't come back - start it with start.py", "error");
+            } finally {
+              this.restartingApp = false;
+            }
           },
 
           async reconnectChrome() {

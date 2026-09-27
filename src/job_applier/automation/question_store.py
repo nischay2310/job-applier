@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from job_applier.automation.question_match import find_match
 from job_applier.utils import get_project_root
 
 _lock = threading.Lock()
@@ -51,20 +52,36 @@ def _save(data: dict[str, Any]) -> None:
         json.dump(data, f, indent=2)
 
 
-def get_answer(question: str) -> str:
-    """Returns a previously supplied answer for this question, if any."""
+def match_answer(question: str, options: list[str] | None = None) -> tuple[str, str]:
+    """The stored answer for this question and how it was found.
+
+    Exact text first, then a same-subject scan over everything already
+    answered - two postings rarely word a screener the same way, and
+    asking again for what amounts to the same question is the thing this
+    store exists to avoid.
+    """
     key = _normalize(question)
+    if not key:
+        return "", ""
     with _lock:
-        data = _load()
-        answers = data["answers"]
-        if key in answers:
-            return str(answers[key].get("answer", ""))
-        # Fall back to a containment match so slight rewordings between
-        # postings still reuse the answer the candidate already gave.
-        for stored_key, entry in answers.items():
-            if stored_key and (stored_key in key or key in stored_key):
-                return str(entry.get("answer", ""))
-    return ""
+        answers = _load()["answers"]
+    if key in answers:
+        return str(answers[key].get("answer", "")), "exact match"
+
+    texts = {k: str(v.get("question") or k) for k, v in answers.items()}
+    given = {k: str(v.get("answer") or "") for k, v in answers.items()}
+    matched, why = find_match(question, texts, given, options)
+    if matched:
+        return str(answers[matched].get("answer", "")), f"{why}: {texts[matched][:60]}"
+    return "", ""
+
+
+def get_answer(question: str, options: list[str] | None = None) -> str:
+    """Returns a previously supplied answer for this question, if any."""
+    answer, why = match_answer(question, options)
+    if answer and why != "exact match":
+        print(f"   Reusing a stored answer - {why}")
+    return answer
 
 
 def record_pending(
@@ -78,6 +95,9 @@ def record_pending(
     in front of the candidate instead of being guessed at."""
     key = _normalize(question)
     if not key:
+        return
+    # Something already answered may cover this wording - don't ask twice.
+    if match_answer(question)[0]:
         return
     with _lock:
         data = _load()

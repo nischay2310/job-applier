@@ -10,6 +10,8 @@ dashboard, and opens it. First time only: sign in to LinkedIn in the
 automation Chrome. Ctrl+C stops the dashboard; that Chrome keeps running.
 
 Options:
+    --stop          stop the dashboard and the automation Chrome
+    --status        show what's running
     --port 8000     dashboard port
     --reload        restart the server on code edits (kills running applies)
     --no-chrome     don't open the automation Chrome
@@ -30,6 +32,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 IS_WINDOWS = os.name == "nt"
+# Matches the web app's restart codes: the dashboard asking to come back,
+# either on its own or with a fresh automation Chrome behind it.
+RESTART_EXIT_CODE = 42
+RESTART_FULL_EXIT_CODE = 43
 
 # Loaded by path, not "import job_applier...": the package __init__ needs
 # dependencies that aren't installed yet on a first run.
@@ -97,7 +103,16 @@ def run_dashboard(port: int, reload: bool) -> None:
 
     # PYTHONUTF8: the app logs emoji, which Windows' default console
     # encoding (cp1252) can't print, crashing the server on startup.
-    env = dict(os.environ, USE_HOST_CHROME="1", PYTHONUNBUFFERED="1", PYTHONUTF8="1")
+    # JOB_APPLIER_SUPERVISED tells the app a restart is as cheap as exiting:
+    # this loop brings it back. Without it the app has to hand the job to
+    # restart.py instead.
+    env = dict(
+        os.environ,
+        USE_HOST_CHROME="1",
+        PYTHONUNBUFFERED="1",
+        PYTHONUTF8="1",
+        JOB_APPLIER_SUPERVISED="1",
+    )
     cmd = [
         str(venv_python()), "-m", "job_applier.cli.web_app",
         "--host", "127.0.0.1", "--port", str(port), "--no-browser",
@@ -105,26 +120,70 @@ def run_dashboard(port: int, reload: bool) -> None:
     if not reload:
         cmd.append("--no-reload")
 
-    server = subprocess.Popen(cmd, cwd=ROOT, env=env)
-    for _ in range(60):
-        if server.poll() is not None:
-            say("Dashboard failed to start - see the error above.")
-            sys.exit(server.returncode or 1)
-        if http_ok(f"{url}/api/health"):
-            break
-        time.sleep(0.5)
-    say(f"Dashboard running at {url}  (Ctrl+C to stop)")
-    webbrowser.open(url)
+    opened = False
+    while True:
+        server = subprocess.Popen(cmd, cwd=ROOT, env=env)
+        for _ in range(60):
+            if server.poll() is not None:
+                say("Dashboard failed to start - see the error above.")
+                sys.exit(server.returncode or 1)
+            if http_ok(f"{url}/api/health"):
+                break
+            time.sleep(0.5)
+        say(f"Dashboard running at {url}  (Ctrl+C to stop)")
+        if not opened:
+            webbrowser.open(url)
+            opened = True
 
-    try:
-        server.wait()
-    except KeyboardInterrupt:
-        say("Stopping dashboard...")
-        server.terminate()
         try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server.kill()
+            code = server.wait()
+        except KeyboardInterrupt:
+            say("Stopping dashboard...")
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+            return
+        if code not in (RESTART_EXIT_CODE, RESTART_FULL_EXIT_CODE):
+            return
+        say("Restart requested from the dashboard...")
+        if code == RESTART_FULL_EXIT_CODE:
+            ok, message = chrome_launcher.restart_chrome()
+            say(message)
+
+
+def stop_everything(port: int) -> None:
+    """Stops the dashboard and the automation Chrome."""
+    if http_ok(f"http://127.0.0.1:{port}/api/health"):
+        if IS_WINDOWS:
+            listing = subprocess.run(
+                ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True
+            ).stdout
+            pids = {
+                line.split()[-1]
+                for line in listing.splitlines()
+                if f":{port}" in line and "LISTENING" in line
+            }
+            for pid in pids:
+                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+        else:
+            subprocess.run(["pkill", "-f", f"job_applier.cli.web_app --host 127.0.0.1 --port {port}"])
+        say("Dashboard stopped.")
+    else:
+        say("Dashboard wasn't running.")
+
+    if chrome_launcher.cdp_ready():
+        chrome_launcher._stop_automation_chrome()
+        say("Automation Chrome stopped.")
+    else:
+        say("Automation Chrome wasn't running.")
+
+
+def show_status(port: int) -> None:
+    running = http_ok(f"http://127.0.0.1:{port}/api/health")
+    say(f"Dashboard:         {'running at http://127.0.0.1:' + str(port) if running else 'stopped'}")
+    say(f"Automation Chrome: {'running' if chrome_launcher.cdp_ready() else 'stopped'}")
 
 
 def main() -> None:
@@ -134,9 +193,19 @@ def main() -> None:
                         help="restart on code edits (interrupts running applies)")
     parser.add_argument("--no-chrome", action="store_true",
                         help="don't open the automation Chrome")
+    parser.add_argument("--stop", action="store_true",
+                        help="stop the dashboard and the automation Chrome")
+    parser.add_argument("--status", action="store_true", help="show what's running")
     args = parser.parse_args()
 
     os.chdir(ROOT)
+    if args.stop:
+        stop_everything(args.port)
+        return
+    if args.status:
+        show_status(args.port)
+        return
+
     install_dependencies()
     if not list((ROOT / "data").glob("*.pdf")):
         say("Note: no resume PDF in data/ - LinkedIn applies will use a generated CV.")

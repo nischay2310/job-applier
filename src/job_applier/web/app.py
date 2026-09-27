@@ -5,6 +5,8 @@ import os
 import queue
 import random
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -21,17 +23,23 @@ from pydantic import BaseModel, Field
 from job_applier.automation.autofill_script import (  # type: ignore[import-not-found]
     save_autofill_assets,
 )
+from job_applier.automation.agent_doctor import (  # type: ignore[import-not-found]
+    diagnose,
+)
 from job_applier.automation.browser_automator import (  # type: ignore[import-not-found]
     AGENTS,
     AGENTS_LOCK,
+    AgentAborted,
     BrowserAutomator,
     agent_frame_path,
+    request_abort,
     verify_linkedin_session,
 )
 from job_applier.chrome_launcher import (
     activate_target,
     cdp_ready,
     close_idle_windows,
+    close_target,
     ensure_chrome,
 )
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
@@ -83,6 +91,22 @@ output_apps_dir = project_root / "output" / "applications"
 output_applied_dir = project_root / "output" / "applied"
 output_expired_dir = project_root / "output" / "expired"
 output_excluded_dir = project_root / "output" / "excluded"
+# start.py watches for these exit codes and starts the dashboard again -
+# the second one restarts the automation Chrome on the way back up.
+RESTART_EXIT_CODE = 42
+RESTART_FULL_EXIT_CODE = 43
+
+
+def _running_port(default: int = 8000) -> int:
+    """The port this server was started on, for handing to restart.py."""
+    argv = sys.argv
+    if "--port" in argv:
+        try:
+            return int(argv[argv.index("--port") + 1])
+        except (IndexError, ValueError):
+            pass
+    return default
+
 QUEUE_EXITS = {
     "applied": output_applied_dir,
     "expired": output_expired_dir,
@@ -817,6 +841,15 @@ def run_auto_apply_for_job(
                 message=f"Completed {status}: {msg}",
                 progress_pct=100,
             )
+        except AgentAborted:
+            # Stopped from the dashboard: the job stays in the queue so it can
+            # be tried again, and nothing is recorded as a failure.
+            set_automation_hud(
+                is_active=False,
+                step="idle",
+                message=f"Stopped {info['company']} - still in the queue",
+                progress_pct=100,
+            )
         except Exception as e:
             set_automation_hud(
                 is_active=False,
@@ -1216,6 +1249,8 @@ def list_agents() -> dict[str, Any]:
         agents = [dict(a) for a in AGENTS.values()]
     for a in agents:
         a["has_frame"] = agent_frame_path(a["id"]).exists()
+        # Say whether it's actually progressing, and what to do if it isn't.
+        a.update(diagnose(a))
     return {"agents": agents}
 
 
@@ -1250,11 +1285,92 @@ def close_idle_agent_windows() -> dict[str, Any]:
     return {"status": "success", "closed": closed}
 
 
+@app.post("/api/agents/{agent_id}/stop")
+def stop_agent(agent_id: str, close_window: bool = Query(False)) -> dict[str, str]:
+    """Stops one agent's job at its next step.
+
+    The job goes back to being queued rather than counting as a failure, so
+    it can be retried once whatever held it up is sorted out.
+    """
+    with AGENTS_LOCK:
+        agent = dict(AGENTS.get(agent_id) or {})
+    if not agent:
+        raise HTTPException(status_code=404, detail="That agent has already finished")
+    if not diagnose(agent)["can_restart"]:
+        raise HTTPException(
+            status_code=409,
+            detail="It's submitting right now - stopping it could lose the application.",
+        )
+    request_abort(agent_id)
+    log_event(
+        f"Stopped agent {agent_id} on {agent.get('company') or 'a job'} - back in the queue",
+        level="WARNING",
+        category="Automation",
+    )
+    if close_window and agent.get("target_id"):
+        close_target(str(agent["target_id"]))
+    return {
+        "status": "success",
+        "message": "Stopping - the job stays in the queue, apply again when you're ready.",
+    }
+
+
 @app.on_event("startup")
 def _close_leftover_windows() -> None:
     # Nothing is running yet, so every open automation window is a leftover.
     if cdp_ready():
         close_idle_windows(set())
+
+
+@app.post("/api/app/restart")
+def restart_app(force: bool = Query(False), full: bool = Query(False)) -> dict[str, str]:
+    """Restarts the application.
+
+    `full` brings the automation Chrome back with it, which is what you want
+    when Chrome itself has gone odd rather than just the code having changed.
+
+    Two ways back up: start.py relaunches the dashboard when it exits with
+    one of the restart codes, and if the app wasn't started that way,
+    restart.py does the job from outside - the process asking to restart
+    can't be the one that brings itself back.
+    """
+    if not force and (AUTOMATION_STATE.get("is_active") or _browser_slot_queue.qsize() < MAX_CONCURRENT_APPLIES):
+        raise HTTPException(
+            status_code=409,
+            detail="An application is being submitted right now - wait for it to finish.",
+        )
+
+    supervised = os.environ.get("JOB_APPLIER_SUPERVISED") == "1"
+    if not supervised:
+        script = project_root / "restart.py"
+        if not script.exists():
+            raise HTTPException(
+                status_code=501,
+                detail="restart.py is missing - stop the app and run 'python start.py'.",
+            )
+        cmd = [sys.executable, str(script), "--port", str(_running_port())]
+        if full:
+            cmd.append("--full")
+        # Detached, or it would die with the server it's waiting on.
+        if os.name == "nt":
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", *cmd],
+                cwd=str(project_root),
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(cmd, cwd=str(project_root), start_new_session=True)
+
+    code = RESTART_FULL_EXIT_CODE if (full and supervised) else RESTART_EXIT_CODE
+
+    def bye() -> None:
+        time.sleep(0.5)
+        os._exit(code)
+
+    threading.Thread(target=bye, daemon=True).start()
+    what = "Restarting everything" if full else "Restarting"
+    return {"status": "success", "message": f"{what} - the page comes back in a few seconds."}
 
 
 @app.post("/api/chrome/connect")

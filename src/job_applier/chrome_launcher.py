@@ -160,3 +160,26 @@ def activate_target(target_id: str) -> bool:
             return r.status == 200
     except Exception:
         return False
+
+
+def restart_chrome() -> tuple[bool, str]:
+    """Closes the automation Chrome and opens a fresh one.
+
+    Worth doing when it has drifted - windows piling up, a stale CDP
+    connection, or a profile left locked by a crash.
+    """
+    _stop_automation_chrome()
+    return ensure_chrome()
+
+
+def close_target(target_id: str) -> bool:
+    """Closes one automation Chrome tab or window by its CDP target id."""
+    if not target_id:
+        return False
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{CDP_PORT}/json/close/{target_id}", timeout=3
+        ) as r:
+            return r.status == 200
+    except Exception:
+        return False
