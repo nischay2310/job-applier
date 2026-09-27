@@ -163,3 +163,18 @@ def delete_answer(question_key: str) -> None:
         data = _load()
         data["answers"].pop(question_key, None)
         _save(data)
+
+
+def dismiss_pending(question_key: str) -> bool:
+    """Drops a question from the pending list without answering it.
+
+    For the ones that arrive mangled - a form whose question text couldn't be
+    read properly - there is nothing worth answering, and leaving it there
+    just hides the questions that matter.
+    """
+    with _lock:
+        data = _load()
+        removed = data["pending"].pop(question_key, None) is not None
+        if removed:
+            _save(data)
+    return removed

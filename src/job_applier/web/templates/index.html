@@ -767,6 +767,16 @@
                     class="text-[11px] text-slate-400 mb-2.5"
                     x-text="'Seen on: ' + (q.seen_on || []).join(', ')"
                   ></p>
+                  <div class="flex items-center gap-2 mb-2.5">
+                    <button
+                      type="button"
+                      @click="dismissQuestion(q)"
+                      class="text-[11px] text-slate-500 hover:text-rose-300 underline underline-offset-2"
+                      title="Remove this question - use it when the question text came through wrong"
+                    >
+                      Not a real question, remove it
+                    </button>
+                  </div>
                   <div class="flex items-center gap-2 flex-wrap">
                     <!-- Radios as radios, a dropdown as a dropdown: the same
                          shape the application form itself asked in. -->
@@ -827,6 +837,28 @@
                             x-text="opt"
                           ></button>
                         </template>
+                      </div>
+                    </template>
+                    <!-- The offered options don't always contain the right
+                         answer - and when a question comes through with its
+                         options garbled, typing is the only way out. -->
+                    <template x-if="(q.options || []).length > 0">
+                      <div class="w-full mt-2 flex items-center gap-2">
+                        <input
+                          type="text"
+                          x-model="questionDrafts['custom-' + q.key]"
+                          @keydown.enter="saveQuestionAnswer(q.question, questionDrafts['custom-' + q.key])"
+                          placeholder="...or type your own answer"
+                          class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          :disabled="!questionDrafts['custom-' + q.key]"
+                          @click="saveQuestionAnswer(q.question, questionDrafts['custom-' + q.key])"
+                          class="px-3 py-1.5 bg-slate-800 hover:bg-emerald-600 border border-slate-700 hover:border-emerald-500 text-slate-200 hover:text-white disabled:opacity-40 rounded-lg text-xs font-semibold transition"
+                        >
+                          Save
+                        </button>
                       </div>
                     </template>
                     <template x-if="questionControl(q) === 'textarea'">
@@ -3421,6 +3453,17 @@
             } catch (e) {
               console.error("Error loading pending questions:", e);
             }
+          },
+
+          async dismissQuestion(q) {
+            if (!confirm("Remove this question from the list?")) return;
+            const res = await fetch("/api/questions/dismiss", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key: q.key }),
+            });
+            this.showToast(res.ok ? "Removed." : "Could not remove it", res.ok ? "success" : "error");
+            this.loadPendingQuestions();
           },
 
           questionControl(q) {

@@ -283,6 +283,10 @@ class QuestionAnswerRequest(BaseModel):
     answer: str
 
 
+class QuestionDismissRequest(BaseModel):
+    key: str
+
+
 class CoverLetterUpdate(BaseModel):
     cover_letter: str
 
@@ -1411,6 +1415,20 @@ def get_pending_questions() -> dict[str, Any]:
     )
 
     return {"pending": list_pending(), "answered": list_answers()}
+
+
+@app.post("/api/questions/dismiss")
+def dismiss_pending_question(body: QuestionDismissRequest) -> dict[str, str]:
+    """Drops a question nobody can answer - normally one whose text came
+    through garbled - so the list only holds questions worth answering."""
+    from job_applier.automation.question_store import (  # type: ignore[import-not-found]
+        dismiss_pending,
+    )
+
+    if not dismiss_pending(body.key):
+        raise HTTPException(status_code=404, detail="That question is no longer listed")
+    log_event(f"Dismissed screening question: {body.key[:60]}", category="Questions")
+    return {"status": "success", "message": "Removed."}
 
 
 @app.post("/api/questions/answer")

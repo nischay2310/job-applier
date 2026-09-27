@@ -1440,26 +1440,53 @@ class BrowserAutomator:
                         const fs = r.closest('fieldset');
                         const text = el => (el && el.innerText ? el.innerText.trim() : '');
                         const byId = id => text(id ? document.getElementById(id) : null);
-                        let q = '';
-                        if (fs) q = text(fs.querySelector('legend'));
-                        if (!q) q = byId(r.getAttribute('aria-labelledby'));
-                        if (!q && fs) q = byId(fs.getAttribute('aria-labelledby'));
                         const group = r.closest("[role=radiogroup], [data-test-form-builder-radio-button-form-component], fieldset");
+                        // What the options say, so option text is never
+                        // mistaken for the question - that turned real
+                        // screeners into "Male Female I prefer not to specify".
+                        const optionText = new Set();
+                        if (group) {
+                            for (const o of group.querySelectorAll("input[type=radio]")) {
+                                const ol = o.labels && o.labels[0] ? text(o.labels[0]) : '';
+                                if (ol) optionText.add(ol.toLowerCase());
+                            }
+                        }
+                        const looksLikeQuestion = t => {
+                            const v = (t || '').replace(/\\s+/g, ' ').trim();
+                            if (v.length < 12) return '';
+                            const low = v.toLowerCase();
+                            if (optionText.has(low)) return '';
+                            // Nothing but options strung together is not a question.
+                            let rest = low;
+                            for (const o of optionText) rest = rest.split(o).join(' ');
+                            if (rest.replace(/[^a-z0-9]/g, '').length < 10) return '';
+                            return v;
+                        };
+                        let q = '';
+                        if (fs) q = looksLikeQuestion(text(fs.querySelector('legend')));
+                        if (!q) q = looksLikeQuestion(byId(r.getAttribute('aria-labelledby')));
+                        if (!q && fs) q = looksLikeQuestion(byId(fs.getAttribute('aria-labelledby')));
                         if (!q && group) {
-                            q = byId(group.getAttribute('aria-labelledby'))
-                                || group.getAttribute('aria-label') || '';
+                            q = looksLikeQuestion(byId(group.getAttribute('aria-labelledby')))
+                                || looksLikeQuestion(group.getAttribute('aria-label'));
                         }
                         if (!q && group) {
-                            // The group's own text minus the option labels.
-                            const opts = Array.from(group.querySelectorAll('label')).map(text);
-                            let whole = text(group);
-                            for (const o of opts) if (o) whole = whole.replace(o, ' ');
-                            q = whole.replace(/\\s+/g, ' ').trim();
+                            // Whatever sits above the options, inside or just
+                            // before the group, is normally the question.
+                            let scope = group;
+                            for (let up = 0; up < 3 && scope && !q; up++) {
+                                for (const el of scope.querySelectorAll('legend,h2,h3,h4,p,span')) {
+                                    if (el.querySelector("input[type=radio]")) continue;
+                                    const candidate = looksLikeQuestion(text(el));
+                                    if (candidate) { q = candidate; break; }
+                                }
+                                if (!q && scope.previousElementSibling) {
+                                    q = looksLikeQuestion(text(scope.previousElementSibling));
+                                }
+                                scope = scope.parentElement;
+                            }
                         }
-                        if (!q && group && group.previousElementSibling) {
-                            q = text(group.previousElementSibling);
-                        }
-                        if (!q) q = r.getAttribute('aria-label') || '';
+                        if (!q) q = looksLikeQuestion(r.getAttribute('aria-label'));
                         groups[name] = {
                             name: name,
                             question: q.trim(),
