@@ -1269,6 +1269,7 @@ class BrowserAutomator:
                         company=company,
                         job_title=job_title,
                         required=self._is_required(el),
+                        kind="select",
                     )
                     report.setdefault("needs_review", []).append(question[:120])
                     self._highlight_element(el, color="#ff9800")
@@ -1322,6 +1323,7 @@ class BrowserAutomator:
                             company=company,
                             job_title=job_title,
                             required=self._is_required(el),
+                            kind=self._field_kind(el),
                         )
                         report.setdefault("needs_review", []).append(
                             clean_label[:120]
@@ -1342,11 +1344,31 @@ class BrowserAutomator:
                     const name = r.getAttribute('name') || '';
                     if (!name) continue;
                     if (!groups[name]) {
+                        // The question lives anywhere but on the radio itself.
+                        // A legend is the tidy case; LinkedIn often uses a
+                        // plain div with the text in a span alongside, and
+                        // missing it meant the question never got asked.
                         const fs = r.closest('fieldset');
+                        const text = el => (el && el.innerText ? el.innerText.trim() : '');
+                        const byId = id => text(id ? document.getElementById(id) : null);
                         let q = '';
-                        if (fs) {
-                            const legend = fs.querySelector('legend');
-                            if (legend) q = legend.innerText || '';
+                        if (fs) q = text(fs.querySelector('legend'));
+                        if (!q) q = byId(r.getAttribute('aria-labelledby'));
+                        if (!q && fs) q = byId(fs.getAttribute('aria-labelledby'));
+                        const group = r.closest("[role=radiogroup], [data-test-form-builder-radio-button-form-component], fieldset");
+                        if (!q && group) {
+                            q = byId(group.getAttribute('aria-labelledby'))
+                                || group.getAttribute('aria-label') || '';
+                        }
+                        if (!q && group) {
+                            // The group's own text minus the option labels.
+                            const opts = Array.from(group.querySelectorAll('label')).map(text);
+                            let whole = text(group);
+                            for (const o of opts) if (o) whole = whole.replace(o, ' ');
+                            q = whole.replace(/\\s+/g, ' ').trim();
+                        }
+                        if (!q && group && group.previousElementSibling) {
+                            q = text(group.previousElementSibling);
                         }
                         if (!q) q = r.getAttribute('aria-label') || '';
                         groups[name] = {
@@ -1398,6 +1420,7 @@ class BrowserAutomator:
                         company=company,
                         job_title=job_title,
                         required=bool(group.get("required")),
+                        kind="radio",
                     )
                     report.setdefault("needs_review", []).append(question[:120])
                     continue
@@ -1442,6 +1465,21 @@ class BrowserAutomator:
                         cb.check()
         except Exception:
             pass
+
+    def _field_kind(self, el: Any) -> str:
+        """Which control a field is, so the Tracker can ask for the answer the
+        same way the site does instead of always offering a text box."""
+        try:
+            return str(
+                el.evaluate(
+                    "e => e.tagName === 'TEXTAREA' ? 'textarea'"
+                    " : e.tagName === 'SELECT' ? 'select'"
+                    " : (e.getAttribute('type') || 'text').toLowerCase()"
+                )
+                or "text"
+            )
+        except Exception:
+            return "text"
 
     def _is_search_box(self, el: Any) -> bool:
         """A site's search box is not an application question - it only gets
@@ -2115,6 +2153,7 @@ class BrowserAutomator:
                         company=company,
                         job_title=job_title,
                         required=True,
+                        kind=field.get("type") or "text",
                     )
                 combined["needs_review"].extend(
                     blockers or ["A required question on this step needs your answer"]

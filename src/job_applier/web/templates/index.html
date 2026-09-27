@@ -768,7 +768,56 @@
                     x-text="'Seen on: ' + (q.seen_on || []).join(', ')"
                   ></p>
                   <div class="flex items-center gap-2 flex-wrap">
-                    <template x-if="(q.options || []).length > 0">
+                    <!-- Radios as radios, a dropdown as a dropdown: the same
+                         shape the application form itself asked in. -->
+                    <template x-if="questionControl(q) === 'radio'">
+                      <div class="w-full space-y-1.5">
+                        <template x-for="opt in q.options" :key="opt">
+                          <label
+                            class="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800 hover:border-emerald-600/60 cursor-pointer"
+                          >
+                            <input
+                              type="radio"
+                              :name="'q-' + q.key"
+                              :value="opt"
+                              x-model="questionDrafts[q.key]"
+                              class="accent-emerald-500"
+                            />
+                            <span class="text-xs text-slate-200" x-text="opt"></span>
+                          </label>
+                        </template>
+                        <button
+                          type="button"
+                          :disabled="!questionDrafts[q.key]"
+                          @click="saveQuestionAnswer(q.question, questionDrafts[q.key])"
+                          class="mt-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition"
+                        >
+                          Save answer
+                        </button>
+                      </div>
+                    </template>
+                    <template x-if="questionControl(q) === 'select'">
+                      <div class="flex items-center gap-2 flex-1 min-w-[260px]">
+                        <select
+                          x-model="questionDrafts[q.key]"
+                          class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                        >
+                          <option value="">Select an option...</option>
+                          <template x-for="opt in q.options" :key="opt">
+                            <option :value="opt" x-text="opt"></option>
+                          </template>
+                        </select>
+                        <button
+                          type="button"
+                          :disabled="!questionDrafts[q.key]"
+                          @click="saveQuestionAnswer(q.question, questionDrafts[q.key])"
+                          class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold transition"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </template>
+                    <template x-if="questionControl(q) === 'buttons'">
                       <div class="flex items-center gap-2 flex-wrap">
                         <template x-for="opt in q.options" :key="opt">
                           <button
@@ -780,10 +829,27 @@
                         </template>
                       </div>
                     </template>
-                    <template x-if="(q.options || []).length === 0">
+                    <template x-if="questionControl(q) === 'textarea'">
+                      <div class="w-full space-y-2">
+                        <textarea
+                          rows="4"
+                          x-model="questionDrafts[q.key]"
+                          placeholder="Type your answer..."
+                          class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                        ></textarea>
+                        <button
+                          type="button"
+                          @click="saveQuestionAnswer(q.question, questionDrafts[q.key])"
+                          class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition"
+                        >
+                          Save answer
+                        </button>
+                      </div>
+                    </template>
+                    <template x-if="questionControl(q) === 'text'">
                       <div class="flex items-center gap-2 flex-1 min-w-[260px]">
                         <input
-                          type="text"
+                          :type="q.kind === 'number' ? 'number' : 'text'"
                           x-model="questionDrafts[q.key]"
                           @keydown.enter="saveQuestionAnswer(q.question, questionDrafts[q.key])"
                           placeholder="Type your answer..."
@@ -3355,6 +3421,18 @@
             } catch (e) {
               console.error("Error loading pending questions:", e);
             }
+          },
+
+          questionControl(q) {
+            const options = q.options || [];
+            const kind = (q.kind || "").toLowerCase();
+            if (!options.length) {
+              return kind === "textarea" ? "textarea" : "text";
+            }
+            if (kind === "select") return "select";
+            const short = options.every((o) => (o || "").length <= 18);
+            if (short && options.length <= 4) return "buttons";
+            return "radio";
           },
 
           async saveQuestionAnswer(question, answer) {

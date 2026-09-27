@@ -90,6 +90,7 @@ def record_pending(
     company: str = "",
     job_title: str = "",
     required: bool = True,
+    kind: str = "text",
 ) -> None:
     """Records a question the automation could not answer, so it can be put
     in front of the candidate instead of being guessed at."""
@@ -111,6 +112,9 @@ def record_pending(
         data["pending"][key] = {
             "question": _first_line(question).replace("*", "").strip(),
             "options": options or existing.get("options") or [],
+            # Which control the site used, so the Tracker can ask the same
+            # way - radios as radios, a dropdown as a dropdown.
+            "kind": kind or existing.get("kind") or "text",
             "required": required or existing.get("required", False),
             "seen_on": seen_on,
             "times_seen": int(existing.get("times_seen", 0)) + 1,
