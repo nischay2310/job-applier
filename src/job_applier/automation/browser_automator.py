@@ -371,7 +371,7 @@ class BrowserAutomator:
         if aborting:
             with AGENTS_LOCK:
                 ABORT_REQUESTS.discard(self.agent_id)
-            raise AgentAborted(f"Agent {self.agent_id} was stopped from the dashboard")
+            raise AgentAborted(f"Agent {self.agent_id} was stopped")
         with AGENTS_LOCK:
             agent = AGENTS.setdefault(
                 self.agent_id,
@@ -440,6 +440,7 @@ class BrowserAutomator:
                 )
             self.target_id = target["targetId"]
             self._own_pages.append(new_page.value)
+            self._install_kill_switch(new_page.value)
             return new_page.value
         except Exception:
             page = self.context.new_page()
@@ -449,7 +450,94 @@ class BrowserAutomator:
                 self.target_id = info["targetInfo"]["targetId"]
             except Exception:
                 pass
+            self._install_kill_switch(page)
             return page
+
+    # Injected into every page an agent opens. Fixed to the corner, outside
+    # the form, so it never collides with what the automation is filling in.
+    KILL_SWITCH_JS = """(agentId) => {
+        if (document.getElementById('job-applier-killswitch')) return;
+        const bar = document.createElement('div');
+        bar.id = 'job-applier-killswitch';
+        bar.style.cssText = [
+            'position:fixed', 'z-index:2147483647', 'bottom:16px', 'right:16px',
+            'display:flex', 'align-items:center', 'gap:10px',
+            'padding:9px 12px', 'border-radius:12px',
+            'background:#0f172a', 'border:1px solid #334155',
+            'box-shadow:0 8px 24px rgba(0,0,0,.45)',
+            'font:600 12px system-ui,-apple-system,Segoe UI,sans-serif',
+            'color:#e2e8f0',
+        ].join(';');
+        const dot = document.createElement('span');
+        dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:#34d399';
+        const label = document.createElement('span');
+        label.textContent = 'Agent ' + agentId + ' working';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Stop this agent';
+        button.style.cssText = [
+            'cursor:pointer', 'padding:5px 10px', 'border-radius:8px',
+            'border:1px solid #f87171', 'background:#7f1d1d', 'color:#fff',
+            'font:600 12px system-ui,-apple-system,Segoe UI,sans-serif',
+        ].join(';');
+        button.onclick = async () => {
+            button.disabled = true;
+            button.textContent = 'Stopping...';
+            dot.style.background = '#f87171';
+            label.textContent = 'Finishing the current step';
+            try { await window.__jobApplierStop(); } catch (e) {
+                button.textContent = 'Could not stop';
+            }
+        };
+        bar.append(dot, label, button);
+        (document.body || document.documentElement).appendChild(bar);
+    }"""
+
+    def _install_kill_switch(self, page: Any) -> None:
+        """Puts a stop button in the agent's window.
+
+        Watching a run go wrong and having to find the dashboard to stop it is
+        the long way round - the window you are already looking at can do it.
+        The button calls back into this process rather than the HTTP API, so
+        it works whatever page LinkedIn has navigated to.
+        """
+        try:
+            page.expose_function("__jobApplierStop", self._stop_from_page)
+        except Exception:
+            pass  # already exposed on this page
+        try:
+            page.add_init_script(
+                f"window.addEventListener('DOMContentLoaded', () => "
+                f"({self.KILL_SWITCH_JS})({self.agent_id!r}));"
+            )
+            page.evaluate(self.KILL_SWITCH_JS, self.agent_id)
+        except Exception:
+            pass  # a page mid-navigation gets it from the init script instead
+
+    def _label_kill_switch(self, company: str, job_title: str) -> None:
+        """Names the job on the badge - with several windows open, "Agent
+        4f2a" tells you nothing about which one you are about to stop."""
+        try:
+            self.page.evaluate(
+                """(text) => {
+                    const bar = document.getElementById('job-applier-killswitch');
+                    if (bar) bar.children[1].textContent = text;
+                }""",
+                f"{company} - {job_title}"[:60],
+            )
+        except Exception:
+            pass
+
+    def _stop_from_page(self) -> bool:
+        """Handles a click on the in-window stop button."""
+        with AGENTS_LOCK:
+            ABORT_REQUESTS.add(self.agent_id)
+        log_event(
+            f"Agent {self.agent_id} stopped from its Chrome window - job stays queued",
+            level="WARNING",
+            category="Automation",
+        )
+        return True
 
     def start(self) -> None:
         """Starts Playwright and launches the browser with automatic fallbacks."""
@@ -745,6 +833,7 @@ class BrowserAutomator:
                         if len(self.context.pages) > initial_pages_count:
                             self.page = self.context.pages[-1]
                             self._own_pages.append(self.page)
+                            self._install_kill_switch(self.page)
                             self.page.bring_to_front()
                             time.sleep(2)
                         break
@@ -2180,6 +2269,7 @@ class BrowserAutomator:
         print(f"\n🚀 Starting Assisted Auto-Apply for {company} - {job_title}")
         self._update_agent(company=company, title=job_title, app_id=app_dir.name)
         success = self.navigate_and_open_form(job_url)
+        self._label_kill_switch(company, job_title)
         self._record_apply_kind(app_dir)
         if not success:
             if self.last_job_inactive:
