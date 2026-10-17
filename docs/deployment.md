@@ -17,8 +17,8 @@ Create a deployment directory and download the generic configuration:
 
 ```bash
 mkdir -p job-applier && cd job-applier
-curl -fsSLO https://raw.githubusercontent.com/ervinpopescu/job-applier/main/compose.yaml
-curl -fsSL https://raw.githubusercontent.com/ervinpopescu/job-applier/main/.env.example -o .env
+curl -fsSLO https://raw.githubusercontent.com/nischay2310/job-applier/main/compose.yaml
+curl -fsSL https://raw.githubusercontent.com/nischay2310/job-applier/main/.env.example -o .env
 ```
 
 Edit `.env` and set at least `GOOGLE_API_KEY`. Forks should also change `JOB_APPLIER_IMAGE` to their own GHCR package:
@@ -57,7 +57,7 @@ docker compose exec -T app sh -c 'cat > /app/data/master_resume.json' < master_r
 Clone the repository and build the exact source checkout:
 
 ```bash
-git clone https://github.com/ervinpopescu/job-applier.git
+git clone https://github.com/nischay2310/job-applier.git
 cd job-applier
 cp .env.example .env
 # Edit .env
