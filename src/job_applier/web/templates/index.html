@@ -2255,6 +2255,15 @@
               <span x-text="reconnectingChrome ? 'Reconnecting...' : 'Reconnect Chrome'"></span>
             </button>
             <button
+              @click="closeIdleWindows()"
+              :disabled="closingIdleWindows"
+              class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5 disabled:opacity-50"
+              title="Close any finished agent's Chrome window that didn't close itself"
+            >
+              <i data-lucide="x-square" class="w-3.5 h-3.5"></i>
+              <span x-text="closingIdleWindows ? 'Closing...' : 'Close Idle Windows'"></span>
+            </button>
+            <button
               @click="closeLiveView()"
               class="text-slate-400 hover:text-white p-1 rounded-lg"
             >
@@ -2668,6 +2677,7 @@
           liveAgents: [],
           liveTick: 0,
           reconnectingChrome: false,
+          closingIdleWindows: false,
           restartingApp: false,
           authModal: {
             open: false,
@@ -2932,6 +2942,27 @@
               this.showToast("Error reconnecting Chrome: " + e, "error");
             } finally {
               this.reconnectingChrome = false;
+            }
+          },
+
+          async closeIdleWindows() {
+            this.closingIdleWindows = true;
+            try {
+              const res = await fetch("/api/agents/close-idle", { method: "POST" });
+              const data = await res.json().catch(() => ({}));
+              if (res.ok) {
+                this.showToast(
+                  data.closed
+                    ? `Closed ${data.closed} leftover Chrome window(s).`
+                    : "No leftover windows to close.",
+                );
+              } else {
+                this.showToast(data.detail || "Could not close idle windows", "error");
+              }
+            } catch (e) {
+              this.showToast("Error closing idle windows: " + e, "error");
+            } finally {
+              this.closingIdleWindows = false;
             }
           },
 

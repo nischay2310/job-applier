@@ -657,7 +657,19 @@ class BrowserAutomator:
                         pass
                 self._own_pages = []
                 if self.target_id:
-                    close_target(self.target_id)
+                    # A transient CDP hiccup here is exactly how a finished
+                    # agent's window is left open with nothing to clean it
+                    # up - one retry, and a log line if it still fails, so
+                    # "Close Idle Windows" isn't the only way to find out.
+                    if not close_target(self.target_id):
+                        time.sleep(0.5)
+                        if not close_target(self.target_id):
+                            log_event(
+                                f"Agent {self.agent_id} finished but its Chrome window "
+                                "didn't close - use 'Close Idle Windows' in the dashboard.",
+                                level="WARN",
+                                category="Auto-Apply",
+                            )
                 if self.playwright:
                     self.playwright.stop()
                 return
