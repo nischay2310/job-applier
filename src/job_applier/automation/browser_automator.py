@@ -2461,6 +2461,181 @@ class BrowserAutomator:
 
         return "skipped", "User did not submit"
 
+    # Any of these, matched as a whole word on a clickable element, counts
+    # as the one-click "apply" Instahyre offers on its opportunities feed -
+    # it doesn't use a form, just a button per job card.
+    INSTAHYRE_APPLY_WORDS = ("apply", "i'm interested", "im interested", "interested")
+    INSTAHYRE_DONE_WORDS = ("applied", "not interested", "withdrawn", "declined")
+
+    def run_instahyre_scan_and_apply(self, max_jobs: int = 30) -> dict[str, Any]:
+        """Scans Instahyre's candidate opportunities feed and clicks Apply on
+        every job that still offers it, skipping ones already responded to.
+
+        Instahyre doesn't use an application form like LinkedIn/Greenhouse -
+        a logged-in candidate's feed just lists jobs with a single action
+        button per card, so this only needs to find and click that button.
+        """
+        if not self.page:
+            self.start()
+
+        report: dict[str, Any] = {"scanned": 0, "applied": 0, "skipped": 0, "jobs": []}
+        self._notify("navigating", "Opening Instahyre opportunities feed...")
+
+        try:
+            self.page.goto("https://www.instahyre.com/", wait_until="domcontentloaded")
+            time.sleep(2)
+        except Exception as e:
+            self._notify("submission_failed", f"Could not open Instahyre: {e}", level="ERROR")
+            return report
+
+        self._dismiss_overlays()
+
+        # Instahyre's own nav is the most reliable way to the feed - its
+        # dashboard URL has changed before and guessing it again would be
+        # one more thing to silently break.
+        opened_feed = False
+        for link_text in ("Opportunities", "Dashboard", "My Matches"):
+            try:
+                link = self.page.get_by_text(link_text, exact=False).first
+                if link.is_visible(timeout=1500):
+                    link.click()
+                    time.sleep(2)
+                    opened_feed = True
+                    break
+            except Exception:
+                continue
+
+        if not opened_feed and "instahyre.com" not in (self.page.url or ""):
+            self._notify(
+                "login_required",
+                "Could not reach the Instahyre opportunities feed - log in first with "
+                "'just login instahyre'.",
+                level="ERROR",
+            )
+            return report
+
+        try:
+            self.page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        cards = self._instahyre_job_cards()
+        report["scanned"] = len(cards)
+        self._notify(
+            "form_detection", f"Found {len(cards)} job card(s) on the Instahyre feed."
+        )
+
+        for idx, card in enumerate(cards[:max_jobs]):
+            try:
+                card_text = (card.inner_text() or "").strip()
+            except Exception:
+                card_text = ""
+            title_line = card_text.splitlines()[0] if card_text else f"Job {idx + 1}"
+
+            button = self._instahyre_apply_button(card)
+            if button is None:
+                report["skipped"] += 1
+                continue
+
+            try:
+                button.scroll_into_view_if_needed()
+                self._highlight_element(button)
+                button.click(timeout=5000)
+                time.sleep(1.5)
+                report["applied"] += 1
+                report["jobs"].append({"title": title_line, "status": "applied"})
+                self._notify(
+                    "submitted",
+                    f"Applied on Instahyre: {title_line}",
+                    level="SUCCESS",
+                )
+            except Exception as e:
+                report["skipped"] += 1
+                report["jobs"].append(
+                    {"title": title_line, "status": "skipped", "reason": str(e)}
+                )
+
+        self._notify(
+            "submitted" if report["applied"] else "skipped",
+            f"Instahyre scan complete: applied to {report['applied']} of "
+            f"{report['scanned']} jobs seen.",
+            level="SUCCESS" if report["applied"] else "WARN",
+        )
+        return report
+
+    def _instahyre_job_cards(self) -> list[Any]:
+        """Each job listing on the feed, as a locator scoped to that card.
+
+        Instahyre doesn't expose a stable class name worth hardcoding, so
+        this looks for the repeating container that holds one apply-style
+        button each, rather than guessing a CSS class that may not survive
+        their next frontend deploy.
+        """
+        try:
+            buttons = self.page.locator(
+                "button, a[role=button], [class*='btn' i]"
+            )
+            count = min(buttons.count(), 200)
+            cards: list[Any] = []
+            seen_card_ids: set[int] = set()
+            for i in range(count):
+                btn = buttons.nth(i)
+                try:
+                    text = (btn.inner_text() or "").strip().lower()
+                except Exception:
+                    continue
+                if not any(w in text for w in self.INSTAHYRE_APPLY_WORDS):
+                    continue
+                try:
+                    card = btn.locator(
+                        "xpath=ancestor::*[self::div or self::li][1]"
+                    )
+                    handle = card.element_handle()
+                    if handle is None:
+                        continue
+                    card_id = id(handle)
+                    if card_id in seen_card_ids:
+                        continue
+                    seen_card_ids.add(card_id)
+                    cards.append(card)
+                except Exception:
+                    continue
+            return cards
+        except Exception:
+            return []
+
+    def _instahyre_apply_button(self, card: Any) -> Any | None:
+        """The clickable apply action inside this card, or None if this job
+        was already responded to (no accidental re-applies)."""
+        try:
+            card_text = (card.inner_text() or "").lower()
+        except Exception:
+            return None
+        if any(w in card_text for w in self.INSTAHYRE_DONE_WORDS):
+            return None
+
+        try:
+            candidates = card.locator("button, a[role=button], [class*='btn' i]")
+            for i in range(min(candidates.count(), 20)):
+                el = candidates.nth(i)
+                try:
+                    text = (el.inner_text() or "").strip().lower()
+                except Exception:
+                    continue
+                if not text or not any(w in text for w in self.INSTAHYRE_APPLY_WORDS):
+                    continue
+                if any(w in text for w in self.INSTAHYRE_DONE_WORDS):
+                    continue
+                try:
+                    if el.is_disabled():
+                        continue
+                except Exception:
+                    pass
+                return el
+        except Exception:
+            pass
+        return None
+
     def run_autonomous_apply(
         self,
         app_dir: Path,

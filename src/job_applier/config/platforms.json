@@ -24,7 +24,8 @@
     "linkedin": "https://www.linkedin.com/login",
     "bestjobs": "https://www.bestjobs.eu/login",
     "ejobs": "https://www.ejobs.ro/login",
-    "google": "https://accounts.google.com"
+    "google": "https://accounts.google.com",
+    "instahyre": "https://www.instahyre.com/candidate_login/"
   },
   "tracking_query_params": [
     "source",

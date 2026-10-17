@@ -1751,6 +1751,66 @@ def batch_apply(
     }
 
 
+@app.post("/api/instahyre/scan-apply")
+def instahyre_scan_apply(background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Opens Instahyre's opportunities feed and clicks Apply on every job
+    still offering it - no form to fill, unlike LinkedIn/Greenhouse."""
+    if _browser_slot_queue.empty():
+        raise HTTPException(
+            status_code=409,
+            detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now — please wait.",
+        )
+
+    def instahyre_hud_callback(
+        step: str, message: str, level: str, details: dict[str, Any]
+    ) -> None:
+        set_automation_hud(
+            is_active=True,
+            company="Instahyre",
+            title="Scan & Apply",
+            step=step,
+            message=message,
+            level=level,
+            progress_pct=0,
+            details=details,
+        )
+
+    def run_instahyre():
+        slot_id = acquire_browser_slot(timeout=300)
+        if slot_id is None:
+            log_event(
+                "Instahyre scan couldn't start: all browser slots busy.",
+                level="ERROR",
+                category="Auto-Apply",
+            )
+            return
+        slot_dir = ensure_slot_seeded(slot_id)
+        automator = BrowserAutomator(
+            headless=False, profile_dir=slot_dir, status_callback=instahyre_hud_callback
+        )
+        try:
+            automator.start()
+            report = automator.run_instahyre_scan_and_apply()
+            log_event(
+                f"Instahyre scan complete: applied to {report['applied']} of "
+                f"{report['scanned']} jobs seen.",
+                level="SUCCESS",
+                category="Auto-Apply",
+            )
+        except Exception as e:
+            log_event(f"Instahyre scan ended with an error: {e}", level="ERROR", category="Auto-Apply")
+        finally:
+            automator.close()
+            set_automation_hud(is_active=False, step="idle", message="Instahyre scan complete", progress_pct=100)
+            release_browser_slot(slot_id)
+
+    background_tasks.add_task(run_instahyre)
+    return {
+        "status": "started",
+        "message": "Scanning Instahyre and applying to every open job - watch live for progress.",
+    }
+
+
 @app.get("/api/tracker")
 def get_tracker_data(status: str | None = Query(None)) -> dict[str, Any]:
     """Returns applications from the tracker CSV with optional status filtering and folders in applied/."""

@@ -10,7 +10,7 @@ from job_applier.automation.auth_manager import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Manage platform logins (LinkedIn, BestJobs, eJobs, Google) and 2FA authentication."
+        description="Manage platform logins (LinkedIn, BestJobs, eJobs, Google, Instahyre) and 2FA authentication."
     )
     subparsers = parser.add_subparsers(dest="command", help="Auth commands")
 
@@ -23,7 +23,7 @@ def main() -> None:
     )
     login_parser.add_argument(
         "platform",
-        choices=["linkedin", "bestjobs", "ejobs", "google"],
+        choices=["linkedin", "bestjobs", "ejobs", "google", "instahyre"],
         help="Target platform to log in to",
     )
     login_parser.add_argument(

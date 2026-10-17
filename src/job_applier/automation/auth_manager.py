@@ -83,6 +83,7 @@ def inspect_profile_cookies(profile_dir: Path) -> dict[str, bool]:
         "bestjobs": False,
         "ejobs": False,
         "google": False,
+        "instahyre": False,
     }
     if not cookie_db or not cookie_db.exists():
         return status
@@ -114,6 +115,10 @@ def inspect_profile_cookies(profile_dir: Path) -> dict[str, bool]:
                 status["ejobs"] = True
             if "google.com" in h and name in ["SID", "SSID", "SAPISID", "HSID"]:
                 status["google"] = True
+            if "instahyre.com" in h and (
+                "session" in n or "auth" in n or name == "sessionid"
+            ):
+                status["instahyre"] = True
     except Exception as e:
         print(f"Notice inspecting cookie db: {e}")
     finally:
@@ -219,7 +224,7 @@ class AuthManager:
             "platforms": {},
         }
 
-        for platform in ["linkedin", "bestjobs", "ejobs", "google"]:
+        for platform in ["linkedin", "bestjobs", "ejobs", "google", "instahyre"]:
             is_logged_in = real_status.get(platform, False)
             status_report["platforms"][platform] = {
                 "configured": is_logged_in,

@@ -428,6 +428,19 @@
               >
             </label>
 
+            <label
+              class="flex items-center space-x-2 px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-slate-300 cursor-pointer hover:border-slate-700 transition"
+              title="Select or deselect every job currently shown below (after filters)"
+            >
+              <input
+                type="checkbox"
+                :checked="allVisibleSelected"
+                @change="toggleSelectAll()"
+                class="rounded text-violet-400 bg-slate-950 border-slate-700 focus:ring-0"
+              />
+              <span class="text-slate-300 font-medium">Select All Shown</span>
+            </label>
+
             <div class="flex items-center space-x-3">
               <!-- Batch Auto-Apply Trigger -->
               <button
@@ -450,6 +463,30 @@
               >
                 <i data-lucide="send" class="w-4 h-4"></i>
                 <span>Easy Apply Next 5</span>
+              </button>
+
+              <!-- Apply to the selected cards' checkboxes -->
+              <button
+                @click="applySelected()"
+                :disabled="selectedAppIds.length === 0 || isBatchRunning"
+                class="px-4 py-2 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white rounded-xl text-sm font-medium transition shadow-lg shadow-violet-950/40 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Apply only to the jobs you've checked below"
+              >
+                <i data-lucide="check-square" class="w-4 h-4"></i>
+                <span
+                  x-text="selectedAppIds.length > 0 ? `Apply Selected (${selectedAppIds.length})` : 'Apply Selected'"
+                ></span>
+              </button>
+
+              <!-- Instahyre: scan the opportunities feed and click Apply on every job -->
+              <button
+                @click="scanInstahyre()"
+                :disabled="isInstahyreScanning"
+                class="px-4 py-2 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white rounded-xl text-sm font-medium transition shadow-lg shadow-orange-950/40 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Opens Instahyre, scans your opportunities feed, and clicks Apply on every job offering it"
+              >
+                <i data-lucide="search" class="w-4 h-4"></i>
+                <span x-text="isInstahyreScanning ? 'Scanning Instahyre...' : 'Scan & Apply: Instahyre'"></span>
               </button>
 
               <!-- Cleanup Button -->
@@ -591,15 +628,24 @@
                 <div>
                   <!-- Company & Title -->
                   <div class="flex items-start justify-between gap-3 mb-2">
-                    <div>
-                      <h4
-                        class="font-bold text-slate-100 text-base leading-tight group-hover:text-emerald-400 transition"
-                        x-text="app.company"
-                      ></h4>
-                      <p
-                        class="text-xs font-medium text-slate-400 mt-0.5 line-clamp-1"
-                        x-text="app.title"
-                      ></p>
+                    <div class="flex items-start gap-2.5 min-w-0">
+                      <input
+                        type="checkbox"
+                        :checked="!!selectedApps[app.id]"
+                        @change="selectedApps = { ...selectedApps, [app.id]: !selectedApps[app.id] }"
+                        title="Select this job for Apply Selected"
+                        class="mt-1 rounded text-violet-400 bg-slate-950 border-slate-700 focus:ring-0 shrink-0"
+                      />
+                      <div class="min-w-0">
+                        <h4
+                          class="font-bold text-slate-100 text-base leading-tight group-hover:text-emerald-400 transition"
+                          x-text="app.company"
+                        ></h4>
+                        <p
+                          class="text-xs font-medium text-slate-400 mt-0.5 line-clamp-1"
+                          x-text="app.title"
+                        ></p>
+                      </div>
                     </div>
                     <a
                       :href="app.job_url"
@@ -2564,10 +2610,31 @@
           activeTab: "queue",
           isLoading: false,
           isBatchRunning: false,
+          isInstahyreScanning: false,
           isApplying: {},
           searchQuery: "",
           easyApplyOnlyFilter: false,
           applications: [],
+          selectedApps: {},
+          get selectedAppIds() {
+            return Object.keys(this.selectedApps).filter(
+              (id) => this.selectedApps[id],
+            );
+          },
+          get allVisibleSelected() {
+            return (
+              this.applications.length > 0 &&
+              this.applications.every((app) => this.selectedApps[app.id])
+            );
+          },
+          toggleSelectAll() {
+            const selectAll = !this.allVisibleSelected;
+            const next = { ...this.selectedApps };
+            for (const app of this.applications) {
+              next[app.id] = selectAll;
+            }
+            this.selectedApps = next;
+          },
           trackerRecords: [],
           trackerStatusFilter: "",
           get visibleTrackerRecords() {
@@ -2974,6 +3041,58 @@
             } finally {
               setTimeout(() => {
                 this.isBatchRunning = false;
+              }, 3000);
+            }
+          },
+
+          async applySelected() {
+            const appIds = this.selectedAppIds;
+            if (!appIds.length) {
+              this.showToast("Select at least one application first", "error");
+              return;
+            }
+            this.isBatchRunning = true;
+            this.showToast(`Starting auto-apply for ${appIds.length} selected jobs...`, "info");
+            try {
+              const res = await fetch("/api/batch-apply", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ app_ids: appIds, mode: "assisted" }),
+              });
+              const data = await res.json().catch(() => ({}));
+              if (res.ok) {
+                this.showToast(
+                  `Applying to ${data.count || appIds.length} selected jobs - watch live for progress.`,
+                );
+                this.selectedApps = {};
+              } else {
+                this.showToast(data.detail || "Could not start the batch", "error");
+              }
+            } catch (e) {
+              this.showToast("Error starting batch: " + e, "error");
+            } finally {
+              setTimeout(() => {
+                this.isBatchRunning = false;
+              }, 3000);
+            }
+          },
+
+          async scanInstahyre() {
+            this.isInstahyreScanning = true;
+            this.showToast("Opening Instahyre and scanning for jobs to apply to...", "info");
+            try {
+              const res = await fetch("/api/instahyre/scan-apply", { method: "POST" });
+              const data = await res.json().catch(() => ({}));
+              if (res.ok) {
+                this.showToast(data.message || "Instahyre scan started - watch live for progress.");
+              } else {
+                this.showToast(data.detail || "Could not start the Instahyre scan", "error");
+              }
+            } catch (e) {
+              this.showToast("Error starting Instahyre scan: " + e, "error");
+            } finally {
+              setTimeout(() => {
+                this.isInstahyreScanning = false;
               }, 3000);
             }
           },
