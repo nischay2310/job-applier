@@ -175,7 +175,7 @@ def generate_autofill_javascript(
                 val = data.github;
             }} else if (matches(el, ["website", "portfolio", "blog", "urls[portfolio]"])) {{
                 val = data.portfolio || data.github;
-            }} else if (matches(el, ["city", "town"])) {{
+            }} else if (matches(el, ["city", "town", "location"])) {{
                 val = data.city;
             }} else if (matches(el, ["address", "street"])) {{
                 val = data.address;

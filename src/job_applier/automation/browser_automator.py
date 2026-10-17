@@ -1293,7 +1293,7 @@ class BrowserAutomator:
                     val, field_name = self.profile.github_url, "GitHub"
                 elif has("website", "portfolio", "blog"):
                     val, field_name = self.profile.portfolio_url or self.profile.github_url, "Portfolio / Website"
-                elif has("city", "town"):
+                elif has("city", "town", "location"):
                     val, field_name = self.profile.city, "City"
                 elif has("address", "street"):
                     val, field_name = self.profile.address, "Address"
@@ -1544,11 +1544,14 @@ class BrowserAutomator:
                 radios = self._form_root().locator(
                     f"input[type=radio][name='{group['name']}']"
                 )
+                answer_lower = answer.lower()
+                answer_pattern = rf"\b{re.escape(answer_lower)}\b"
                 for i in range(radios.count()):
                     radio = radios.nth(i)
                     label = self._get_element_descriptor(radio)
                     value = (radio.get_attribute("value") or "").lower()
-                    if answer.lower() in label or answer.lower() == value:
+                    # Word-boundary match: "no" must not match inside "not sure".
+                    if re.search(answer_pattern, label) or answer_lower == value:
                         radio.check()
                         report["questions_answered"].append(
                             {"question": question[:50], "answer": answer}

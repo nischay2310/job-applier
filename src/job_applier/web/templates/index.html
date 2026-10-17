@@ -3472,7 +3472,11 @@
             if (!options.length) {
               return kind === "textarea" ? "textarea" : "text";
             }
+            // Honor the control the real form used before falling back to a
+            // length-based guess - a short "select" shouldn't turn into
+            // buttons just because its options happen to be short words.
             if (kind === "select") return "select";
+            if (kind === "radio") return "radio";
             const short = options.every((o) => (o || "").length <= 18);
             if (short && options.length <= 4) return "buttons";
             return "radio";

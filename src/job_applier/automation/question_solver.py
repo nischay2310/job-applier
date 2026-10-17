@@ -275,20 +275,27 @@ class QuestionSolver:
         if re.fullmatch(r"\s*\d+(?:\.\d+)?\s*(?:\+|years?|yrs?)?\s*", target, re.I):
             return self._match_number_to_range(target, options)
 
-        # Substring match
-        for opt in options:
-            opt_lower = opt.strip().lower()
-            if target_lower in opt_lower or opt_lower in target_lower:
-                return opt
-
-        # Yes/No matching
+        # Yes/No matching - checked before the generic substring match below,
+        # since "no" is a substring of "not sure" / "none" and would
+        # otherwise steal the match from the real Yes/No option.
         if target_lower in ["yes", "true", "y"]:
             for opt in options:
-                if opt.strip().lower() in ["yes", "i do", "i agree", "true"]:
+                opt_lower = opt.strip().lower()
+                if opt_lower in ["yes", "i do", "i agree", "true"] or opt_lower.startswith(
+                    ("yes,", "yes ", "i do ")
+                ):
                     return opt
         elif target_lower in ["no", "false", "n"]:
             for opt in options:
-                if opt.strip().lower() in ["no", "i do not", "false"]:
+                opt_lower = opt.strip().lower()
+                if (
+                    opt_lower in ["no", "false"]
+                    or opt_lower.startswith(("no,", "no "))
+                    or any(
+                        phrase in opt_lower
+                        for phrase in ("do not", "does not", "don't", "doesn't")
+                    )
+                ):
                     return opt
 
         # Decline / Prefer not to say
@@ -298,6 +305,16 @@ class QuestionSolver:
                     w in opt.lower() for w in ["prefer not", "decline", "choose not"]
                 ):
                     return opt
+
+        # Substring match - word-boundary only, so "no" never matches inside
+        # "not sure" or "none" and "a" never matches inside "java".
+        for opt in options:
+            opt_lower = opt.strip().lower()
+            pattern = rf"\b{re.escape(target_lower)}\b"
+            if re.search(pattern, opt_lower) or re.search(
+                rf"\b{re.escape(opt_lower)}\b", target_lower
+            ):
+                return opt
 
         # A number against ranges: "4" -> "3-5 years", "8" -> "7+ years"
         ranged = self._match_number_to_range(target, options)

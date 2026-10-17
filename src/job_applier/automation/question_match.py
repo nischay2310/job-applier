@@ -203,7 +203,11 @@ def answer_fits(question: str, answer: str, options: list[str] | None = None) ->
     if not answer:
         return False
     low = answer.lower()
-    if options and any(low == o.strip().lower() or low in o.lower() for o in options):
+    # Word-boundary match: "no" must not match inside "not sure".
+    if options and any(
+        low == o.strip().lower() or re.search(rf"\b{re.escape(low)}\b", o.lower())
+        for o in options
+    ):
         return True
     text = _clean(question)
     first = text.split()[0] if text else ""

@@ -45,6 +45,12 @@ install_pkg() {
 
 say "Checking prerequisites..."
 
+# --- curl (needed below to install uv and, on some systems, Chrome) ---
+if ! have curl; then
+  say "curl not found. Installing..."
+  install_pkg curl curl curl
+fi
+
 # --- Python 3.10+ ---
 PYTHON_BIN=""
 for candidate in python3.12 python3.11 python3.10 python3; do
