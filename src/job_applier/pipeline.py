@@ -374,6 +374,9 @@ def run_application_pipeline(
                             company=company,
                             job_title=job_title,
                         )
+                    # Done with this job - close its window now rather than
+                    # leaving it open until the whole run ends.
+                    automator.release_window()
 
                     if status == "applied":
                         target_dir = applied_base / app_dir.name

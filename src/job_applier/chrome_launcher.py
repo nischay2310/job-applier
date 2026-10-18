@@ -172,6 +172,15 @@ def restart_chrome() -> tuple[bool, str]:
     return ensure_chrome()
 
 
+def target_is_open(target_id: str) -> bool:
+    """True while Chrome still lists this tab or window."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3) as r:
+            return any(t.get("id") == target_id for t in json.load(r))
+    except Exception:
+        return False
+
+
 def close_target(target_id: str) -> bool:
     """Closes one automation Chrome tab or window by its CDP target id."""
     if not target_id:

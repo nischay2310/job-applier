@@ -28,7 +28,12 @@ from job_applier.automation.cloudflare import (  # type: ignore[import-not-found
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     record_pending,
 )
-from job_applier.chrome_launcher import cdp_ready, close_target, ensure_chrome
+from job_applier.chrome_launcher import (
+    cdp_ready,
+    close_target,
+    ensure_chrome,
+    target_is_open,
+)
 from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
     QuestionSolver,
 )
@@ -642,34 +647,114 @@ class BrowserAutomator:
             self.close()
             raise
 
+    def _new_tabs_since(self, pages_before: list[Any]) -> list[Any]:
+        """Tabs opened since pages_before - preferring ones this agent's own
+        page opened, since the automation Chrome is shared with other agents."""
+        fresh = [p for p in self.context.pages if p not in pages_before]
+        mine = []
+        for page in fresh:
+            try:
+                if page.opener() == self.page:
+                    mine.append(page)
+            except Exception:
+                continue
+        return mine or fresh
+
+    def _close_agent_window(self) -> None:
+        """Closes this agent's Chrome window with every tab in it, including
+        tabs an Apply click opened that we never tracked. Anything left
+        behind would sit there holding a logged-in page open for nothing."""
+        self._close_tabs_in_window()
+        for page in reversed(self._own_pages):
+            try:
+                page.close()
+            except Exception:
+                pass
+        self._own_pages = []
+        if self.target_id and target_is_open(self.target_id):
+            # A transient CDP hiccup is how a finished agent's window gets
+            # left open - one retry, then a log line so "Close Idle Windows"
+            # isn't the only way to find out.
+            if not close_target(self.target_id):
+                time.sleep(0.5)
+                if not close_target(self.target_id):
+                    log_event(
+                        f"Agent {self.agent_id} finished but its Chrome window "
+                        "didn't close - use 'Close Idle Windows' in the dashboard.",
+                        level="WARN",
+                        category="Auto-Apply",
+                    )
+
+    def _close_tabs_in_window(self) -> None:
+        """Closes every tab in this agent's window, plus any popup those tabs
+        opened (a popup can get a window of its own)."""
+        if not (self.browser and self.target_id):
+            return
+        try:
+            cdp = self.browser.new_browser_cdp_session()
+            window_id = cdp.send(
+                "Browser.getWindowForTarget", {"targetId": self.target_id}
+            )["windowId"]
+            tabs = [
+                info
+                for info in cdp.send("Target.getTargets")["targetInfos"]
+                if info["type"] == "page"
+            ]
+            ours = {self.target_id}
+            for info in tabs:
+                try:
+                    tab_window = cdp.send(
+                        "Browser.getWindowForTarget", {"targetId": info["targetId"]}
+                    )["windowId"]
+                except Exception:
+                    continue
+                if tab_window == window_id:
+                    ours.add(info["targetId"])
+            # Popups opened by our tabs, and popups opened by those.
+            grew = True
+            while grew:
+                grew = False
+                for info in tabs:
+                    if info.get("openerId") in ours and info["targetId"] not in ours:
+                        ours.add(info["targetId"])
+                        grew = True
+            for target_id in ours:
+                try:
+                    cdp.send("Target.closeTarget", {"targetId": target_id})
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def release_window(self) -> None:
+        """Closes the agent's window once a job is finished. The next job
+        opens a fresh one, so a long run doesn't leave one window per job
+        (or one forever) sitting open."""
+        if not self.using_host_chrome:
+            return
+        self._close_agent_window()
+        with AGENTS_LOCK:
+            AGENTS.pop(self.agent_id, None)
+        agent_frame_path(self.agent_id).unlink(missing_ok=True)
+        self.page = None
+        self.target_id = None
+
+    def _reopen_window(self) -> None:
+        """A new window after release_window(), or a first start."""
+        if self.using_host_chrome and self.context is not None:
+            self.page = self._open_agent_window()
+            self.page.set_default_navigation_timeout(30000)
+            self.page.set_default_timeout(10000)
+        else:
+            self.start()
+
     def close(self) -> None:
         """Closes browser and stops Playwright engine."""
         try:
             if self.using_host_chrome:
-                # Never tear down the automation Chrome itself - close the
-                # tabs this run opened (including any the Apply button spawned)
-                # and its window, then detach. Anything left behind would sit
-                # there holding a logged-in LinkedIn page open for nothing.
-                for page in reversed(self._own_pages):
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                self._own_pages = []
-                if self.target_id:
-                    # A transient CDP hiccup here is exactly how a finished
-                    # agent's window is left open with nothing to clean it
-                    # up - one retry, and a log line if it still fails, so
-                    # "Close Idle Windows" isn't the only way to find out.
-                    if not close_target(self.target_id):
-                        time.sleep(0.5)
-                        if not close_target(self.target_id):
-                            log_event(
-                                f"Agent {self.agent_id} finished but its Chrome window "
-                                "didn't close - use 'Close Idle Windows' in the dashboard.",
-                                level="WARN",
-                                category="Auto-Apply",
-                            )
+                # Never tear down the automation Chrome itself - only this
+                # agent's window, then detach.
+                self._close_agent_window()
                 if self.playwright:
                     self.playwright.stop()
                 return
@@ -717,7 +802,7 @@ class BrowserAutomator:
         Navigates to job URL and attempts to click 'Apply' / 'Apply now' if on an overview page.
         """
         if not self.page:
-            self.start()
+            self._reopen_window()
         self.last_apply_kind = None
         self.last_job_inactive = ""
         self.last_excluded = ""
@@ -766,7 +851,7 @@ class BrowserAutomator:
             pass
 
         # If it opened a new tab/popup upon clicking an apply button
-        initial_pages_count = len(self.context.pages)
+        pages_before = list(self.context.pages)
 
         # Check for common "Apply" / "Easy Apply" / "Apply on company website" buttons
         apply_selectors = [
@@ -842,8 +927,9 @@ class BrowserAutomator:
                             break
                     if clicked:
                         # Check if a new tab was opened
-                        if len(self.context.pages) > initial_pages_count:
-                            self.page = self.context.pages[-1]
+                        opened = self._new_tabs_since(pages_before)
+                        if opened:
+                            self.page = opened[-1]
                             self._own_pages.append(self.page)
                             self._install_kill_switch(self.page)
                             self.page.bring_to_front()
@@ -2504,7 +2590,7 @@ class BrowserAutomator:
         if not self.page:
             self.start()
 
-        report: dict[str, Any] = {"scanned": 0, "applied": 0, "skipped": 0, "jobs": []}
+        report = self._instahyre_empty_report()
         self._notify("navigating", "Opening Instahyre opportunities feed...")
 
         try:
@@ -2545,6 +2631,16 @@ class BrowserAutomator:
         except Exception:
             pass
 
+        return self._instahyre_apply_on_feed(max_jobs)
+
+    @staticmethod
+    def _instahyre_empty_report() -> dict[str, Any]:
+        return {"scanned": 0, "applied": 0, "skipped": 0, "jobs": []}
+
+    def _instahyre_apply_on_feed(self, max_jobs: int) -> dict[str, Any]:
+        """Clicks Apply on every open job card of the feed that is already
+        on screen."""
+        report = self._instahyre_empty_report()
         cards = self._instahyre_job_cards()
         report["scanned"] = len(cards)
         self._notify(
