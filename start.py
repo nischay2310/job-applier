@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
 import os
 import shutil
 import subprocess
@@ -86,43 +85,6 @@ def http_ok(url: str, timeout: float = 2) -> bool:
         return False
 
 
-def needs_onboarding() -> bool:
-    return not (ROOT / "data" / "master_resume.json").exists()
-
-
-def run_onboarding() -> bool:
-    """Asks a new user for their details. Returns True if they were saved."""
-    if not sys.stdin.isatty():
-        say("First run, but there's no terminal to ask questions - fill in the dashboard instead.")
-        return False
-    subprocess.run(
-        [str(venv_python()), "-m", "job_applier.cli.onboarding"],
-        cwd=ROOT,
-        env=dict(os.environ, PYTHONUTF8="1"),
-    )
-    return not needs_onboarding()
-
-
-def start_first_search(url: str) -> None:
-    """Kicks off the scraper using the roles and places the user just gave."""
-    profile_file = ROOT / "data" / "candidate_profile.json"
-    profile = json.loads(profile_file.read_text(encoding="utf-8"))
-    roles = profile.get("target_roles") or []
-    places = profile.get("target_locations") or []
-    if not roles or not places:
-        say("No job titles or places saved, so skipping the first search.")
-        return
-    body = json.dumps({"terms": roles, "locations": places}).encode()
-    request = urllib.request.Request(
-        f"{url}/api/pipeline/run", body, {"Content-Type": "application/json"}
-    )
-    try:
-        urllib.request.urlopen(request, timeout=10)
-        say("Job search started - watch progress in the dashboard.")
-    except Exception as e:
-        say(f"Could not start the search ({e}). Use Scrape Jobs in the dashboard.")
-
-
 def start_chrome() -> None:
     if not IS_WINDOWS and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         say("No desktop display detected - Chrome needs one so you can log in to LinkedIn.")
@@ -132,7 +94,7 @@ def start_chrome() -> None:
         sys.exit(1)
 
 
-def run_dashboard(port: int, reload: bool, search_on_start: bool = False) -> None:
+def run_dashboard(port: int, reload: bool) -> None:
     url = f"http://127.0.0.1:{port}"
     if http_ok(f"{url}/api/health"):
         say(f"Dashboard already running - opening {url}")
@@ -172,8 +134,6 @@ def run_dashboard(port: int, reload: bool, search_on_start: bool = False) -> Non
         if not opened:
             webbrowser.open(url)
             opened = True
-            if search_on_start:
-                start_first_search(url)
 
         try:
             code = server.wait()
@@ -247,15 +207,11 @@ def main() -> None:
         return
 
     install_dependencies()
-    search_on_start = False
-    if needs_onboarding() and run_onboarding():
-        answer = input("Start searching for jobs now? [Y/n]: ").strip().lower()
-        search_on_start = answer in ("", "y", "yes")
     if not list((ROOT / "data").glob("*.pdf")):
         say("Note: no resume PDF in data/ - LinkedIn applies will use a generated CV.")
     if not args.no_chrome:
         start_chrome()
-    run_dashboard(args.port, args.reload, search_on_start)
+    run_dashboard(args.port, args.reload)
 
 
 if __name__ == "__main__":

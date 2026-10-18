@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +54,13 @@ from job_applier.automation.candidate_profile import (  # type: ignore[import-no
     load_candidate_profile,
     save_candidate_profile,
 )
+from job_applier.cli.onboarding import (  # type: ignore[import-not-found]
+    needs_onboarding,
+    read_resume_with_gemini,
+    save_api_key,
+    save_onboarding,
+)
+from job_applier.db import get_onboarding_answers
 from job_applier.logger import (  # type: ignore[import-not-found]
     clear_logs,
     get_recent_logs,
@@ -374,6 +389,23 @@ def get_health() -> dict[str, str]:
     return {"status": "ok", "service": "job-applier"}
 
 
+ONBOARDING_SCRIPT = Path(__file__).resolve().parent / "static" / "onboarding.js"
+ONBOARDING_TAG = '<script src="/onboarding.js"></script>'
+
+
+@app.get("/onboarding.js", include_in_schema=False)
+def get_onboarding_script() -> FileResponse:
+    """The first-run popup, shared by both dashboards."""
+    return FileResponse(ONBOARDING_SCRIPT, media_type="text/javascript")
+
+
+def with_onboarding(html: str) -> str:
+    """Adds the popup script to a dashboard page."""
+    if "</body>" in html:
+        return html.replace("</body>", ONBOARDING_TAG + "</body>", 1)
+    return html + ONBOARDING_TAG
+
+
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard() -> HTMLResponse:
     """Renders the main single-page web dashboard (prefers compiled Angular SPA if built)."""
@@ -384,7 +416,7 @@ def get_dashboard() -> HTMLResponse:
     if str(angular_index).startswith(str(angular_dist)) and angular_index.is_file():
         try:
             with open(angular_index, encoding="utf-8") as f:
-                return HTMLResponse(content=f.read())
+                return HTMLResponse(content=with_onboarding(f.read()))
         except OSError as err:
             print(f"Notice loading Angular index: {err}")
 
@@ -394,7 +426,7 @@ def get_dashboard() -> HTMLResponse:
     try:
         with open(template_path, encoding="utf-8") as f:
             html_content = f.read()
-        return HTMLResponse(content=html_content)
+        return HTMLResponse(content=with_onboarding(html_content))
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error loading template: {e}"
@@ -2027,6 +2059,57 @@ def update_profile(body: dict[str, Any]) -> dict[str, Any]:
             setattr(profile, k, v)
     save_candidate_profile(profile)
     return {"status": "success", "profile": profile.to_dict()}
+
+
+@app.get("/api/onboarding")
+def get_onboarding() -> dict[str, Any]:
+    """Tells the dashboard whether to show the first-run popup."""
+    return {
+        "needed": needs_onboarding(),
+        "has_api_key": bool(os.environ.get("GOOGLE_API_KEY", "").strip()),
+        "answers": get_onboarding_answers(),
+    }
+
+
+@app.post("/api/onboarding/resume")
+def read_onboarding_resume(
+    file: UploadFile = File(...), api_key: str = Form("")
+) -> dict[str, Any]:
+    """Reads an uploaded resume PDF so the popup can pre-fill its answers."""
+    pdf_bytes = file.file.read()
+    if api_key.strip():
+        save_api_key(api_key.strip())
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
+    load_dotenv(project_root / ".env")
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Add a Gemini API key first so the resume can be read.",
+        )
+    details = read_resume_with_gemini(pdf_bytes, api_key)
+    if not details:
+        raise HTTPException(
+            status_code=422, detail="Could not read that resume - fill in the form by hand."
+        )
+    return {"details": details}
+
+
+@app.post("/api/onboarding")
+async def finish_onboarding(
+    details: str = Form(...), resume: UploadFile | None = File(None)
+) -> dict[str, Any]:
+    """Saves the popup's answers (and the resume PDF, if one was uploaded)."""
+    try:
+        answers = json.loads(details)
+    except json.JSONDecodeError as err:
+        raise HTTPException(status_code=400, detail="Answers were not valid JSON.") from err
+    if not str(answers.get("name", "")).strip():
+        raise HTTPException(status_code=400, detail="Please enter your name.")
+    resume_pdf = await resume.read() if resume else None
+    save_onboarding(answers, resume_pdf)
+    return {"status": "success"}
 
 
 @app.post("/api/pipeline/run")
