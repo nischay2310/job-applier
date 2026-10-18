@@ -55,9 +55,9 @@ from job_applier.automation.candidate_profile import (  # type: ignore[import-no
     save_candidate_profile,
 )
 from job_applier.cli.onboarding import (  # type: ignore[import-not-found]
+    ResumeReadError,
     needs_onboarding,
-    read_resume_with_gemini,
-    save_api_key,
+    read_resume,
     save_onboarding,
 )
 from job_applier.db import get_onboarding_answers
@@ -2072,28 +2072,15 @@ def get_onboarding() -> dict[str, Any]:
 
 
 @app.post("/api/onboarding/resume")
-def read_onboarding_resume(
-    file: UploadFile = File(...), api_key: str = Form("")
-) -> dict[str, Any]:
+def read_onboarding_resume(file: UploadFile = File(...)) -> dict[str, Any]:
     """Reads an uploaded resume PDF so the popup can pre-fill its answers."""
     pdf_bytes = file.file.read()
-    if api_key.strip():
-        save_api_key(api_key.strip())
     if not pdf_bytes.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
-    load_dotenv(project_root / ".env")
-    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Add a Gemini API key first so the resume can be read.",
-        )
-    details = read_resume_with_gemini(pdf_bytes, api_key)
-    if not details:
-        raise HTTPException(
-            status_code=422, detail="Could not read that resume - fill in the form by hand."
-        )
-    return {"details": details}
+    try:
+        return {"details": read_resume(pdf_bytes)}
+    except ResumeReadError as err:
+        raise HTTPException(status_code=422, detail=str(err)) from err
 
 
 @app.post("/api/onboarding")

@@ -80,6 +80,16 @@ else
   say "Google Chrome already installed."
 fi
 
+# --- Ollama + a small local model (reads your resume privately) ---
+if ! have ollama; then
+  say "Ollama not found. Installing..."
+  brew install ollama
+fi
+say "Downloading the resume-reading model (qwen2.5:3b, about 2 GB, first time only)..."
+brew services start ollama >/dev/null 2>&1 || (nohup ollama serve >/dev/null 2>&1 &)
+sleep 3
+ollama pull qwen2.5:3b
+
 # --- Python dependencies ---
 say "Installing Python dependencies (uv sync)..."
 uv sync

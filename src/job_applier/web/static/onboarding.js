@@ -84,10 +84,9 @@
 
     const body = new FormData();
     body.append("file", file);
-    body.append("api_key", fieldValue("api_key"));
     const button = document.getElementById("onb-read");
     button.disabled = true;
-    setMessage("Reading your resume...");
+    setMessage("Reading your resume on this computer (can take up to 2 minutes)...");
     try {
       const response = await fetch("/api/onboarding/resume", { method: "POST", body });
       const data = await response.json();
@@ -104,7 +103,7 @@
   async function save() {
     if (!fieldValue("name")) return setMessage("Please enter your name.");
 
-    const details = { ...resumeDetails, api_key: fieldValue("api_key") };
+    const details = { ...resumeDetails };
     for (const field of FIELDS) details[field.key] = fieldValue(field.key);
     // Typed job title/company only apply when the resume gave no experience.
     if (resumeDetails.experience && resumeDetails.experience.length) {
@@ -146,13 +145,13 @@
     });
   }
 
-  function buildPopup(hasKey) {
+  function buildPopup() {
     document.head.append(el("style", { textContent: css }));
 
     const box = el("div", { id: "onb-box" });
     box.append(
       el("h2", {}, "Welcome! Let's set you up"),
-      el("p", {}, "Upload your resume to fill this in for you, or just type your details."),
+      el("p", {}, "Upload your resume to fill this in for you (read privately on this computer), or just type your details."),
     );
 
     const card = el("div", { className: "onb-card" });
@@ -160,14 +159,6 @@
       el("label", { textContent: "Resume (PDF)" }),
       el("input", { id: "onb-file", type: "file", accept: "application/pdf" }),
     );
-    if (!hasKey) {
-      card.append(
-        el("label", { textContent: "Gemini API key (free at aistudio.google.com/app/apikey)" }),
-        el("input", { id: "onb-api_key", type: "password" }),
-      );
-    } else {
-      card.append(el("input", { id: "onb-api_key", type: "hidden" }));
-    }
     const readButton = el("button", { id: "onb-read", className: "secondary", textContent: "Read my resume" });
     readButton.onclick = readResume;
     card.append(readButton);
@@ -195,7 +186,7 @@
     try {
       const response = await fetch("/api/onboarding");
       const status = await response.json();
-      if (status.needed) buildPopup(status.has_api_key);
+      if (status.needed) buildPopup();
     } catch (err) {
       // The dashboard still works without the popup.
     }

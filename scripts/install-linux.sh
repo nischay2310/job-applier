@@ -2,7 +2,7 @@
 # One-attempt install + launch for Job Applier on Linux (Debian/Ubuntu, Fedora, Arch).
 #
 # What it does, in order:
-#   1. Installs missing prerequisites (Python 3.12, uv, Node.js, Google Chrome)
+#   1. Installs missing prerequisites (Python 3.12, uv, Node.js, Google Chrome, Ollama)
 #   2. Installs Python + frontend dependencies
 #   3. Builds the dashboard UI and downloads the Playwright browser
 #   4. Creates your .env and data files from the provided examples
@@ -113,6 +113,16 @@ if ! have google-chrome && ! have google-chrome-stable && ! have chromium-browse
 else
   say "Google Chrome / Chromium already installed."
 fi
+
+# --- Ollama + a small local model (reads your resume privately) ---
+if ! have ollama; then
+  say "Ollama not found. Installing..."
+  curl -fsSL https://ollama.com/install.sh | sh
+fi
+say "Downloading the resume-reading model (qwen2.5:3b, about 2 GB, first time only)..."
+(have systemctl && sudo systemctl start ollama 2>/dev/null) || (nohup ollama serve >/dev/null 2>&1 &)
+sleep 3
+ollama pull qwen2.5:3b
 
 # --- Python dependencies ---
 say "Installing Python dependencies (uv sync)..."

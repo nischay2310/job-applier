@@ -87,14 +87,61 @@ def test_name_is_required(client):
     assert response.status_code == 400
 
 
-def test_resume_reader_needs_a_pdf_and_a_key(client):
-    not_pdf = client.post(
+def test_resume_reader_rejects_non_pdf(client):
+    response = client.post(
         "/api/onboarding/resume", files={"file": ("cv.txt", b"hello", "text/plain")}
     )
-    assert not_pdf.status_code == 400
+    assert response.status_code == 400
 
-    no_key = client.post(
+
+def test_resume_reader_says_so_when_ollama_is_missing(client, monkeypatch):
+    monkeypatch.setattr(onboarding, "pdf_to_text", lambda _pdf: "Alex Example, Python")
+    monkeypatch.setattr(onboarding, "OLLAMA_URL", "http://127.0.0.1:9")  # nothing there
+    response = client.post(
         "/api/onboarding/resume", files={"file": ("cv.pdf", b"%PDF-1.4", "application/pdf")}
     )
-    assert no_key.status_code == 400
-    assert "API key" in no_key.json()["detail"]
+    assert response.status_code == 422
+    assert "Ollama" in response.json()["detail"]
+
+
+def test_resume_text_goes_to_the_local_model_and_comes_back_as_details(monkeypatch):
+    asked = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"message": {"content": json.dumps({"name": "Alex Example"})}}
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        asked["body"] = json.loads(request.data)
+        return FakeResponse()
+
+    monkeypatch.setattr(onboarding, "pdf_to_text", lambda _pdf: "Alex Example, Python dev")
+    monkeypatch.setattr(onboarding.urllib.request, "urlopen", fake_urlopen)
+
+    assert onboarding.read_resume(b"%PDF")["name"] == "Alex Example"
+    assert asked["body"]["model"] == onboarding.OLLAMA_MODEL
+    assert "Python dev" in asked["body"]["messages"][0]["content"]
+
+
+def test_odd_shapes_from_a_small_model_are_tidied():
+    tidy = onboarding.tidy_details(
+        {
+            "name": "Alex",
+            "location": {"City": "Bangalore", "Country": "India"},
+            "skills": "Python, SQL",
+            "experience": "none",
+            "education": ["x"],
+        }
+    )
+    assert tidy["location"] == "Bangalore, India"
+    assert tidy["skills"] == ["Python", "SQL"]
+    assert tidy["experience"] == []
+    assert tidy["education"] == {}

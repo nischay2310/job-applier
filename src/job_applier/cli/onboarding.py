@@ -8,10 +8,15 @@ the scraper and tailoring have something to work with.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
+
+from pypdf import PdfReader
 
 from job_applier.automation.candidate_profile import (
     CandidateProfile,
@@ -42,42 +47,93 @@ def as_list(value: Any) -> list[str]:
     return split_list(str(value or ""))
 
 
-def read_resume_with_gemini(pdf_bytes: bytes, api_key: str) -> dict[str, Any]:
-    """Asks Gemini to read a resume PDF (given as bytes) and returns its
-    details as a dict.
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
 
-    Returns an empty dict if anything goes wrong, so the caller can just
-    fall back to asking the questions by hand.
-    """
+RESUME_PROMPT = (
+    "Read this resume and return only a JSON object with these keys: "
+    "name, email, phone, location (City, Country), linkedin, github, "
+    "languages, summary, skills (list of strings), "
+    "experience (list of {role, company, dates, details: list of strings}), "
+    "education ({institution, degree, details}), "
+    "years_of_experience (a number), target_roles (list of 3 job titles "
+    "this person should search for). Use empty strings when unknown.\n\n"
+)
+
+
+class ResumeReadError(Exception):
+    """The resume couldn't be read; the message is safe to show the user."""
+
+
+def pdf_to_text(pdf_bytes: bytes) -> str:
+    """The plain text of a resume PDF."""
     try:
-        from google import genai  # type: ignore[attr-defined]
-        from google.genai import types
-
-        prompt = (
-            "Read this resume and return only a JSON object with these keys: "
-            "name, email, phone, location (City, Country), linkedin, github, "
-            "languages, summary, skills (list of strings), "
-            "experience (list of {role, company, dates, details: list of strings}), "
-            "education ({institution, degree, details}), "
-            "years_of_experience (a number), target_roles (list of 3 job titles "
-            "this person should search for). Use empty strings when unknown. "
-            "No markdown, just the JSON."
-        )
-        client = genai.Client(api_key=api_key)
-        model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-        response = client.models.generate_content(
-            model=model,
-            contents=[
-                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-                prompt,
-            ],
-        )
-        text = (response.text or "").strip()
-        text = text.removeprefix("```json").removeprefix("```").removesuffix("```")
-        return json.loads(text)
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
     except Exception as e:
-        print(f"Could not read the resume automatically: {e}")
-        return {}
+        raise ResumeReadError(f"That PDF couldn't be opened ({e}).") from e
+    if not text.strip():
+        raise ResumeReadError(
+            "No text found in that PDF (is it a scan?) - fill in the form by hand."
+        )
+    return text
+
+
+def read_resume(pdf_bytes: bytes) -> dict[str, Any]:
+    """Reads a resume PDF with a small model running on this computer
+    (Ollama) and returns its details as a dict. Nothing leaves the machine."""
+    text = pdf_to_text(pdf_bytes)
+    request = urllib.request.Request(
+        f"{OLLAMA_URL}/api/chat",
+        data=json.dumps(
+            {
+                "model": OLLAMA_MODEL,
+                "stream": False,
+                "format": "json",
+                "messages": [{"role": "user", "content": RESUME_PROMPT + text[:12000]}],
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            answer = json.load(response)["message"]["content"]
+    except urllib.error.URLError as e:
+        raise ResumeReadError(
+            "Couldn't reach Ollama. Install it from https://ollama.com, run "
+            f"'ollama pull {OLLAMA_MODEL}', then try again."
+        ) from e
+    except Exception as e:
+        raise ResumeReadError(f"The local model failed ({e}).") from e
+    try:
+        details = json.loads(answer)
+    except json.JSONDecodeError as e:
+        raise ResumeReadError("The local model's answer wasn't usable.") from e
+    return tidy_details(details) if isinstance(details, dict) else {}
+
+
+TEXT_FIELDS = ("name", "email", "phone", "location", "linkedin", "github", "languages", "summary")
+
+
+def tidy_details(details: dict[str, Any]) -> dict[str, Any]:
+    """Small models sometimes answer in the wrong shape (a location as
+    {"City": ..., "Country": ...}). Turn everything into what the form and
+    the rest of the app expect."""
+    tidy = dict(details)
+    for key in TEXT_FIELDS:
+        value = tidy.get(key, "")
+        if isinstance(value, dict):
+            value = ", ".join(str(v) for v in value.values() if v)
+        elif isinstance(value, list):
+            value = ", ".join(str(v) for v in value if v)
+        tidy[key] = str(value or "").strip()
+    tidy["skills"] = as_list(tidy.get("skills"))
+    tidy["target_roles"] = as_list(tidy.get("target_roles"))
+    if not isinstance(tidy.get("experience"), list):
+        tidy["experience"] = []
+    if not isinstance(tidy.get("education"), dict):
+        tidy["education"] = {}
+    return tidy
 
 
 def build_master_resume(details: dict[str, Any]) -> dict[str, Any]:
