@@ -96,7 +96,7 @@ If a script says "permission denied" on Mac/Linux, run `chmod +x scripts/*.sh` o
 
 When setup finishes, your browser opens automatically at **<http://127.0.0.1:8000>**. From there you can:
 
-1. Fill in your profile and resume details (or edit `data/master_resume.json` and `data/candidate_profile.json` directly).
+1. Check your profile and resume details. On the very first run, `start.py` asks for your resume PDF (optional) and a few basic questions in the terminal, saves them, and offers to start the first job search for you. You can edit `data/master_resume.json` and `data/candidate_profile.json` any time.
 2. Click **Scrape Jobs** to pull in new postings.
 3. Review each tailored resume/cover letter, then **Auto-Apply** or **Autonomous Submit**.
 
