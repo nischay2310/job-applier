@@ -19,8 +19,9 @@ if str(src_dir) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def isolate_test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Guarantees that test runs never write mock data into the production database or CSV tracker."""
+    """Guarantees that test runs never touch the production database, CSV tracker or saved screening answers."""
     test_db = tmp_path / "test_job_applier.db"
     test_csv = tmp_path / "test_tracker.csv"
     monkeypatch.setenv("JOB_APPLIER_DB_PATH", str(test_db))
     monkeypatch.setenv("JOB_APPLIER_TRACKER_PATH", str(test_csv))
+    monkeypatch.setenv("JOB_APPLIER_ANSWERS_PATH", str(tmp_path / "test_screening_answers.json"))

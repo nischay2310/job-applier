@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,9 @@ _lock = threading.Lock()
 
 
 def _store_path() -> Path:
+    override = os.environ.get("JOB_APPLIER_ANSWERS_PATH")
+    if override:
+        return Path(override)
     return get_project_root() / "data" / "screening_answers.json"
 
 
