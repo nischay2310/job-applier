@@ -2646,6 +2646,14 @@ class BrowserAutomator:
         self._notify(
             "form_detection", f"Found {len(cards)} job card(s) on the Instahyre feed."
         )
+        if not cards:
+            self._notify(
+                "login_required",
+                "No jobs on the Instahyre feed. If you aren't logged in, run "
+                "'just login instahyre' first.",
+                level="WARN",
+            )
+            return report
 
         for idx, card in enumerate(cards[:max_jobs]):
             try:

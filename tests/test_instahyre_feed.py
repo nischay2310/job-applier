@@ -57,3 +57,16 @@ def test_only_open_jobs_are_applied_to_once(feed_page):
         "DevOps Engineer / Apply",
     ]
     assert report["applied"] == 2
+
+
+def test_empty_feed_tells_the_user_to_log_in(feed_page):
+    feed_page.set_content("<html><body><h1>Welcome to Instahyre</h1></body></html>")
+    automator = BrowserAutomator()
+    automator.page = feed_page
+    messages = []
+    automator._notify = lambda step, message, **kwargs: messages.append((step, message))
+
+    report = automator._instahyre_apply_on_feed(max_jobs=30)
+
+    assert report["applied"] == 0
+    assert any(step == "login_required" for step, _ in messages)
