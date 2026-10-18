@@ -2478,6 +2478,20 @@ class BrowserAutomator:
     # it doesn't use a form, just a button per job card.
     INSTAHYRE_APPLY_WORDS = ("apply", "i'm interested", "im interested", "interested")
     INSTAHYRE_DONE_WORDS = ("applied", "not interested", "withdrawn", "declined")
+    # A card that offers both "Interested" and "Not interested" is still open,
+    # so only these mean the whole card was already answered.
+    INSTAHYRE_CARD_DONE_WORDS = ("applied", "withdrawn", "declined")
+
+    @staticmethod
+    def _instahyre_is_apply_text(text: str) -> bool:
+        """True for a button label that applies ("Apply", "I'm interested")
+        and not for one that closes the job ("Applied", "Not interested")."""
+        text = text.strip().lower()
+        if not text:
+            return False
+        if any(w in text for w in BrowserAutomator.INSTAHYRE_DONE_WORDS):
+            return False
+        return any(w in text for w in BrowserAutomator.INSTAHYRE_APPLY_WORDS)
 
     def run_instahyre_scan_and_apply(self, max_jobs: int = 30) -> dict[str, Any]:
         """Scans Instahyre's candidate opportunities feed and clicks Apply on
@@ -2589,26 +2603,25 @@ class BrowserAutomator:
             )
             count = min(buttons.count(), 200)
             cards: list[Any] = []
-            seen_card_ids: set[int] = set()
+            seen_cards: set[str] = set()
             for i in range(count):
                 btn = buttons.nth(i)
                 try:
                     text = (btn.inner_text() or "").strip().lower()
                 except Exception:
                     continue
-                if not any(w in text for w in self.INSTAHYRE_APPLY_WORDS):
+                if not self._instahyre_is_apply_text(text):
                     continue
                 try:
                     card = btn.locator(
                         "xpath=ancestor::*[self::div or self::li][1]"
                     )
-                    handle = card.element_handle()
-                    if handle is None:
+                    # Two buttons in one card give the same text, so this
+                    # keeps each job to a single entry.
+                    card_key = (card.inner_text() or "").strip()
+                    if not card_key or card_key in seen_cards:
                         continue
-                    card_id = id(handle)
-                    if card_id in seen_card_ids:
-                        continue
-                    seen_card_ids.add(card_id)
+                    seen_cards.add(card_key)
                     cards.append(card)
                 except Exception:
                     continue
@@ -2623,7 +2636,7 @@ class BrowserAutomator:
             card_text = (card.inner_text() or "").lower()
         except Exception:
             return None
-        if any(w in card_text for w in self.INSTAHYRE_DONE_WORDS):
+        if any(w in card_text for w in self.INSTAHYRE_CARD_DONE_WORDS):
             return None
 
         try:
@@ -2634,9 +2647,7 @@ class BrowserAutomator:
                     text = (el.inner_text() or "").strip().lower()
                 except Exception:
                     continue
-                if not text or not any(w in text for w in self.INSTAHYRE_APPLY_WORDS):
-                    continue
-                if any(w in text for w in self.INSTAHYRE_DONE_WORDS):
+                if not self._instahyre_is_apply_text(text):
                     continue
                 try:
                     if el.is_disabled():
