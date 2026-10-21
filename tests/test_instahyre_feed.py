@@ -70,3 +70,28 @@ def test_empty_feed_tells_the_user_to_log_in(feed_page):
 
     assert report["applied"] == 0
     assert any(step == "login_required" for step, _ in messages)
+
+
+def test_filters_pick_only_matching_jobs(feed_page):
+    automator = BrowserAutomator()
+    automator.page = feed_page
+    automator._notify = lambda *args, **kwargs: None
+
+    report = automator._instahyre_apply_on_feed(
+        max_jobs=30, include=["devops"], exclude=[]
+    )
+
+    assert feed_page.evaluate("window.clicked") == ["DevOps Engineer / Apply"]
+    assert report["applied"] == 1
+    assert any(job.get("reason") == "filtered out" for job in report["jobs"])
+
+
+def test_max_jobs_stops_after_that_many_applications(feed_page):
+    automator = BrowserAutomator()
+    automator.page = feed_page
+    automator._notify = lambda *args, **kwargs: None
+
+    report = automator._instahyre_apply_on_feed(max_jobs=1)
+
+    assert report["applied"] == 1
+    assert len(feed_page.evaluate("window.clicked")) == 1

@@ -172,6 +172,20 @@ def restart_chrome() -> tuple[bool, str]:
     return ensure_chrome()
 
 
+def open_page(url: str) -> bool:
+    """Opens a URL in a new tab of the automation Chrome and brings it forward."""
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{CDP_PORT}/json/new?{url}", method="PUT"
+        )
+        with urllib.request.urlopen(request, timeout=5) as r:
+            tab = json.load(r)
+        activate_target(tab["id"])
+        return True
+    except Exception:
+        return False
+
+
 def target_is_open(target_id: str) -> bool:
     """True while Chrome still lists this tab or window."""
     try:

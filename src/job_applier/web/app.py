@@ -49,6 +49,7 @@ from job_applier.chrome_launcher import (
     close_idle_windows,
     close_target,
     ensure_chrome,
+    open_page,
 )
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
     load_candidate_profile,
@@ -362,6 +363,12 @@ class RequeueRequest(BaseModel):
 
 class SubmitCodeRequest(BaseModel):
     code: str
+
+
+class InstahyreScanRequest(BaseModel):
+    include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    max_jobs: int = Field(30, ge=1, le=100)
 
 
 class AuthLoginRequest(BaseModel):
@@ -1783,10 +1790,31 @@ def batch_apply(
     }
 
 
+@app.post("/api/instahyre/login")
+def instahyre_login() -> dict[str, str]:
+    """Opens Instahyre's login page in the automation Chrome - the same
+    browser the scan uses, so signing in once there is enough."""
+    ok, message = ensure_chrome()
+    if not ok:
+        raise HTTPException(status_code=503, detail=message)
+    if not open_page("https://www.instahyre.com/login/"):
+        raise HTTPException(
+            status_code=502, detail="Chrome didn't open the Instahyre login page."
+        )
+    return {
+        "status": "success",
+        "message": "Sign in to Instahyre in the Chrome window that just opened.",
+    }
+
+
 @app.post("/api/instahyre/scan-apply")
-def instahyre_scan_apply(background_tasks: BackgroundTasks) -> dict[str, Any]:
+def instahyre_scan_apply(
+    background_tasks: BackgroundTasks, body: InstahyreScanRequest | None = None
+) -> dict[str, Any]:
     """Opens Instahyre's opportunities feed and clicks Apply on every job
-    still offering it - no form to fill, unlike LinkedIn/Greenhouse."""
+    still offering it that passes the keyword filters - no form to fill,
+    unlike LinkedIn/Greenhouse."""
+    filters = body or InstahyreScanRequest()
     if _browser_slot_queue.empty():
         raise HTTPException(
             status_code=409,
@@ -1822,7 +1850,11 @@ def instahyre_scan_apply(background_tasks: BackgroundTasks) -> dict[str, Any]:
         )
         try:
             automator.start()
-            report = automator.run_instahyre_scan_and_apply()
+            report = automator.run_instahyre_scan_and_apply(
+                max_jobs=filters.max_jobs,
+                include=filters.include,
+                exclude=filters.exclude,
+            )
             log_event(
                 f"Instahyre scan complete: applied to {report['applied']} of "
                 f"{report['scanned']} jobs seen.",

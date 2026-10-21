@@ -258,6 +258,18 @@ def agent_frame_path(agent_id: str) -> Path:
     return get_project_root() / "data" / "live" / f"{agent_id}.png"
 
 
+def job_passes_filters(
+    card_text: str, include: list[str] | None, exclude: list[str] | None
+) -> bool:
+    """Whether a job card's text passes the user's keyword filters: it must
+    mention at least one `include` word (if any are given) and none of the
+    `exclude` words."""
+    text = card_text.lower()
+    if include and not any(word.lower() in text for word in include):
+        return False
+    return not any(word.lower() in text for word in exclude or [])
+
+
 class BrowserAutomator:
     """Automates job application submission and form autofill using Playwright."""
 
@@ -2579,7 +2591,12 @@ class BrowserAutomator:
             return False
         return any(w in text for w in BrowserAutomator.INSTAHYRE_APPLY_WORDS)
 
-    def run_instahyre_scan_and_apply(self, max_jobs: int = 30) -> dict[str, Any]:
+    def run_instahyre_scan_and_apply(
+        self,
+        max_jobs: int = 30,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Scans Instahyre's candidate opportunities feed and clicks Apply on
         every job that still offers it, skipping ones already responded to.
 
@@ -2631,15 +2648,20 @@ class BrowserAutomator:
         except Exception:
             pass
 
-        return self._instahyre_apply_on_feed(max_jobs)
+        return self._instahyre_apply_on_feed(max_jobs, include, exclude)
 
     @staticmethod
     def _instahyre_empty_report() -> dict[str, Any]:
         return {"scanned": 0, "applied": 0, "skipped": 0, "jobs": []}
 
-    def _instahyre_apply_on_feed(self, max_jobs: int) -> dict[str, Any]:
+    def _instahyre_apply_on_feed(
+        self,
+        max_jobs: int,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Clicks Apply on every open job card of the feed that is already
-        on screen."""
+        on screen and passes the keyword filters, up to max_jobs applications."""
         report = self._instahyre_empty_report()
         cards = self._instahyre_job_cards()
         report["scanned"] = len(cards)
@@ -2655,12 +2677,21 @@ class BrowserAutomator:
             )
             return report
 
-        for idx, card in enumerate(cards[:max_jobs]):
+        for idx, card in enumerate(cards):
+            if report["applied"] >= max_jobs:
+                break
             try:
                 card_text = (card.inner_text() or "").strip()
             except Exception:
                 card_text = ""
             title_line = card_text.splitlines()[0] if card_text else f"Job {idx + 1}"
+
+            if not job_passes_filters(card_text, include, exclude):
+                report["skipped"] += 1
+                report["jobs"].append(
+                    {"title": title_line, "status": "skipped", "reason": "filtered out"}
+                )
+                continue
 
             button = self._instahyre_apply_button(card)
             if button is None:

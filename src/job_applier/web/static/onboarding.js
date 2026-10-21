@@ -75,6 +75,9 @@
       const value = toText(mapped[field.key]);
       if (value) input.value = value;
     }
+    // Search where they live unless they say otherwise.
+    const places = document.getElementById("onb-target_locations");
+    if (!places.value) places.value = fieldValue("location");
   }
 
   async function readResume() {

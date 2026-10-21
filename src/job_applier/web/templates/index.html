@@ -489,6 +489,51 @@
                 <span x-text="isInstahyreScanning ? 'Scanning Instahyre...' : 'Scan & Apply: Instahyre'"></span>
               </button>
 
+              <!-- Instahyre scan filters -->
+              <details class="relative">
+                <summary
+                  class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-medium cursor-pointer select-none list-none"
+                  title="Choose which Instahyre jobs the scan applies to"
+                >
+                  Instahyre Filters
+                </summary>
+                <div
+                  class="absolute z-30 mt-2 w-72 p-4 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl space-y-3 text-xs text-slate-300"
+                >
+                  <label class="block">
+                    Only jobs mentioning (comma separated)
+                    <input
+                      type="text"
+                      x-model="instahyreFilters.include"
+                      @input="saveInstahyreFilters()"
+                      placeholder="devops, sre, kubernetes"
+                      class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    />
+                  </label>
+                  <label class="block">
+                    Skip jobs mentioning (comma separated)
+                    <input
+                      type="text"
+                      x-model="instahyreFilters.exclude"
+                      @input="saveInstahyreFilters()"
+                      placeholder="intern, sales"
+                      class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    />
+                  </label>
+                  <label class="block">
+                    Apply to at most
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      x-model.number="instahyreFilters.max_jobs"
+                      @input="saveInstahyreFilters()"
+                      class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    />
+                  </label>
+                </div>
+              </details>
+
               <!-- Cleanup Button -->
               <button
                 type="button"
@@ -2537,6 +2582,31 @@
               </button>
             </div>
 
+            <!-- Instahyre (opens its login in the automation Chrome, which the scan uses) -->
+            <div
+              class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between"
+            >
+              <div class="flex items-center space-x-3">
+                <div
+                  class="w-9 h-9 rounded-xl bg-orange-500/20 border border-orange-500/30 flex items-center justify-center text-orange-400 font-bold text-xs"
+                >
+                  IH
+                </div>
+                <div>
+                  <h4 class="text-sm font-semibold text-white">Instahyre</h4>
+                  <p class="text-xs text-slate-400">
+                    Sign in once in the Chrome window that opens - it's remembered
+                  </p>
+                </div>
+              </div>
+              <button
+                @click="openInstahyreLogin()"
+                class="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition"
+              >
+                Open Instahyre Login
+              </button>
+            </div>
+
             <!-- eJobs -->
             <div
               class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between"
@@ -2620,6 +2690,14 @@
           isLoading: false,
           isBatchRunning: false,
           isInstahyreScanning: false,
+          instahyreFilters: (() => {
+            const fallback = { include: "", exclude: "", max_jobs: 30 };
+            try {
+              return { ...fallback, ...JSON.parse(localStorage.getItem("instahyreFilters") || "{}") };
+            } catch (e) {
+              return fallback;
+            }
+          })(),
           isApplying: {},
           searchQuery: "",
           easyApplyOnlyFilter: false,
@@ -3108,11 +3186,42 @@
             }
           },
 
+          saveInstahyreFilters() {
+            try {
+              localStorage.setItem("instahyreFilters", JSON.stringify(this.instahyreFilters));
+            } catch (e) {
+              // Filters just won't be remembered.
+            }
+          },
+
+          async openInstahyreLogin() {
+            try {
+              const res = await fetch("/api/instahyre/login", { method: "POST" });
+              const data = await res.json().catch(() => ({}));
+              if (res.ok) {
+                this.showToast(data.message);
+              } else {
+                this.showToast(data.detail || "Could not open the Instahyre login", "error");
+              }
+            } catch (e) {
+              this.showToast("Error opening Instahyre login: " + e, "error");
+            }
+          },
+
           async scanInstahyre() {
             this.isInstahyreScanning = true;
             this.showToast("Opening Instahyre and scanning for jobs to apply to...", "info");
             try {
-              const res = await fetch("/api/instahyre/scan-apply", { method: "POST" });
+              const words = (text) => text.split(",").map((w) => w.trim()).filter(Boolean);
+              const res = await fetch("/api/instahyre/scan-apply", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  include: words(this.instahyreFilters.include || ""),
+                  exclude: words(this.instahyreFilters.exclude || ""),
+                  max_jobs: this.instahyreFilters.max_jobs || 30,
+                }),
+              });
               const data = await res.json().catch(() => ({}));
               if (res.ok) {
                 this.showToast(data.message || "Instahyre scan started - watch live for progress.");
