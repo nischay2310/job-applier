@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,11 @@ from job_applier.automation.candidate_profile import (  # type: ignore[import-no
 from job_applier.automation.cloudflare import (  # type: ignore[import-not-found]
     VirtualDisplayManager,
 )
+from job_applier.chrome_launcher import CDP_PORT, PROFILE_DIR, cdp_ready
 from job_applier.config import (  # type: ignore[import-not-found]
     get_platforms_config,
 )
 from job_applier.logger import log_event  # type: ignore[import-not-found]
-from job_applier.utils import get_project_root
 
 PLATFORM_LOGIN_URLS: dict[str, str] = get_platforms_config().get("login_urls", {})
 
@@ -75,9 +76,8 @@ def get_cookie_db_path(profile_dir: Path) -> Path | None:
     return None
 
 
-def inspect_profile_cookies(profile_dir: Path) -> dict[str, bool]:
-    """Inspects the actual Chrome cookie database to check real platform login status."""
-    cookie_db = get_cookie_db_path(profile_dir)
+def platforms_from_cookies(cookies: list[tuple[str, str]]) -> dict[str, bool]:
+    """Which platforms look logged in, from (host, cookie name) pairs."""
     status: dict[str, bool] = {
         "linkedin": False,
         "bestjobs": False,
@@ -85,46 +85,91 @@ def inspect_profile_cookies(profile_dir: Path) -> dict[str, bool]:
         "google": False,
         "instahyre": False,
     }
-    if not cookie_db or not cookie_db.exists():
-        return status
+    for host, name in cookies:
+        h = host.lower()
+        n = name.lower()
+        if "linkedin.com" in h and name in ["li_at", "liap"]:
+            status["linkedin"] = True
+        if "bestjobs.eu" in h and (
+            "token" in n
+            or "auth" in n
+            or "session" in n
+            or name in ["auth_csrfToken", "tracking_sid"]
+        ):
+            status["bestjobs"] = True
+        if "ejobs.ro" in h and (
+            "token" in n or "auth" in n or "user" in n or name == "logged_in"
+        ):
+            status["ejobs"] = True
+        if "google.com" in h and name in ["SID", "SSID", "SAPISID", "HSID"]:
+            status["google"] = True
+        if "instahyre.com" in h and (
+            "session" in n or "auth" in n or name == "sessionid"
+        ):
+            status["instahyre"] = True
+    return status
 
-    tmp_db = Path(f"/tmp/chk_auth_{os.getpid()}.db")
+
+def is_instahyre_sign_in(url: str) -> bool:
+    """True for Instahyre's login page or a Google sign-in started from it."""
+    url = url.lower()
+    return "instahyre" in url and any(
+        word in url for word in ("/login", "signin", "oauth")
+    )
+
+
+def inspect_profile_cookies(profile_dir: Path) -> dict[str, bool]:
+    """Reads the cookie file of a Chrome profile (works when Chrome isn't
+    holding it open)."""
+    cookie_db = get_cookie_db_path(profile_dir)
+    if not cookie_db or not cookie_db.exists():
+        return platforms_from_cookies([])
+
+    tmp_db = Path(tempfile.gettempdir()) / f"chk_auth_{os.getpid()}.db"
+    rows: list[tuple[str, str]] = []
     try:
         shutil.copyfile(cookie_db, tmp_db)
         conn = sqlite3.connect(tmp_db)
-        c = conn.cursor()
-        c.execute("SELECT host_key, name FROM cookies")
-        rows = c.fetchall()
+        rows = conn.execute("SELECT host_key, name FROM cookies").fetchall()
         conn.close()
-
-        for host, name in rows:
-            h = host.lower()
-            n = name.lower()
-            if "linkedin.com" in h and name in ["li_at", "liap"]:
-                status["linkedin"] = True
-            if "bestjobs.eu" in h and (
-                "token" in n
-                or "auth" in n
-                or "session" in n
-                or name in ["auth_csrfToken", "tracking_sid"]
-            ):
-                status["bestjobs"] = True
-            if "ejobs.ro" in h and (
-                "token" in n or "auth" in n or "user" in n or name == "logged_in"
-            ):
-                status["ejobs"] = True
-            if "google.com" in h and name in ["SID", "SSID", "SAPISID", "HSID"]:
-                status["google"] = True
-            if "instahyre.com" in h and (
-                "session" in n or "auth" in n or name == "sessionid"
-            ):
-                status["instahyre"] = True
     except Exception as e:
         print(f"Notice inspecting cookie db: {e}")
     finally:
         tmp_db.unlink(missing_ok=True)
+    return platforms_from_cookies(rows)
 
-    return status
+
+def automation_chrome_logins() -> dict[str, bool]:
+    """Logins of the automation Chrome - the one LinkedIn, Instahyre and the
+    rest all use. Asks the running browser, since Chrome keeps its cookie
+    file locked while open; falls back to the profile folder."""
+    if cdp_ready():
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as pw:
+                browser = pw.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{CDP_PORT}"
+                )
+                cookies = [
+                    (c["domain"], c["name"])
+                    for context in browser.contexts
+                    for c in context.cookies()
+                ]
+                urls = [
+                    page.url
+                    for context in browser.contexts
+                    for page in context.pages
+                ]
+            status = platforms_from_cookies(cookies)
+            # Instahyre hands out a session cookie before anyone signs in, so
+            # a tab still on its (or Google's) sign-in page means not done yet.
+            if any(is_instahyre_sign_in(url) for url in urls):
+                status["instahyre"] = False
+            return status
+        except Exception as e:
+            print(f"Notice reading automation Chrome cookies: {e}")
+    return inspect_profile_cookies(PROFILE_DIR)
 
 
 def merge_sqlite_cookies(src_db: Path, dest_db: Path) -> int:
@@ -211,13 +256,16 @@ class AuthManager:
     """Manages persistent platform logins (LinkedIn, BestJobs, eJobs, Google) and cookie synchronization."""
 
     def __init__(self, profile_dir: Path | None = None):
-        project_root = get_project_root()
-        self.profile_dir = profile_dir or (project_root / ".browser_profile")
+        self.profile_dir = profile_dir or PROFILE_DIR
         self.candidate = load_candidate_profile()
 
     def check_auth_status(self) -> dict[str, Any]:
-        """Checks real login status by inspecting actual cookies in .browser_profile."""
-        real_status = inspect_profile_cookies(self.profile_dir)
+        """Real login status, read from the automation Chrome's cookies."""
+        real_status = (
+            inspect_profile_cookies(self.profile_dir)
+            if self.profile_dir != PROFILE_DIR
+            else automation_chrome_logins()
+        )
 
         status_report: dict[str, Any] = {
             "profile_dir": str(self.profile_dir),

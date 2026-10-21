@@ -66,3 +66,24 @@ def test_sync_from_desktop_chrome_says_so_when_nothing_was_copied(monkeypatch):
 
     assert response.status_code == 200
     assert "Open Instahyre Login" in response.json()["message"]
+
+
+def test_instahyre_sign_in_pages_are_recognised():
+    from job_applier.automation.auth_manager import is_instahyre_sign_in
+
+    assert is_instahyre_sign_in("https://www.instahyre.com/login/")
+    assert is_instahyre_sign_in(
+        "https://accounts.google.com/v3/signin/identifier?redirect_uri=https%3A%2F%2Fwww.instahyre.com%2Fcomplete"
+    )
+    assert not is_instahyre_sign_in("https://www.instahyre.com/candidate/opportunities/")
+    assert not is_instahyre_sign_in("https://www.linkedin.com/feed/")
+
+
+def test_login_status_reads_cookie_names_from_the_automation_chrome():
+    from job_applier.automation.auth_manager import platforms_from_cookies
+
+    status = platforms_from_cookies(
+        [("www.instahyre.com", "sessionid"), (".linkedin.com", "li_at")]
+    )
+    assert status["instahyre"] and status["linkedin"]
+    assert not status["google"]
