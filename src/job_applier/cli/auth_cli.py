@@ -9,6 +9,8 @@ from job_applier.automation.auth_manager import (
 
 
 def main() -> None:
+    # Windows consoles default to cp1252, which can't print the emoji below.
+    sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(
         description="Manage platform logins (LinkedIn, BestJobs, eJobs, Google, Instahyre) and 2FA authentication."
     )
