@@ -1456,6 +1456,35 @@ def get_pending_questions() -> dict[str, Any]:
     return {"pending": list_pending(), "answered": list_answers()}
 
 
+def clear_answerable_questions() -> int:
+    """Removes pending questions the profile and resume can answer now."""
+    from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
+        QuestionSolver,
+        auto_answer_pending,
+    )
+
+    return auto_answer_pending(QuestionSolver(load_candidate_profile()))
+
+
+@app.on_event("startup")
+def _clear_answerable_questions() -> None:
+    try:
+        cleared = clear_answerable_questions()
+        if cleared:
+            log_event(f"Answered {cleared} waiting question(s) from your profile.", category="Questions")
+    except Exception as e:
+        print(f"Notice: could not re-check waiting questions: {e}")
+
+
+@app.post("/api/questions/auto-answer")
+def auto_answer_questions() -> dict[str, Any]:
+    """Re-checks the waiting questions against the profile and resume."""
+    from job_applier.automation.question_store import list_pending  # type: ignore[import-not-found]
+
+    cleared = clear_answerable_questions()
+    return {"cleared": cleared, "left": len(list_pending())}
+
+
 @app.post("/api/questions/dismiss")
 def dismiss_pending_question(body: QuestionDismissRequest) -> dict[str, str]:
     """Drops a question nobody can answer - normally one whose text came

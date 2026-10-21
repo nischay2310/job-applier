@@ -111,3 +111,31 @@ def test_logged_in_but_nothing_new_is_not_called_a_login_problem(feed_page):
     assert report["applied"] == 0
     assert "feed_empty" in steps
     assert "login_required" not in steps
+
+
+RADIOS = """
+<html><body><form>
+  <div class="q"><span>Can you join us immediately?</span>
+    <div><input type="radio" name="join"><span>Yes</span></div>
+    <div><input type="radio" name="join"><span>No</span></div></div>
+</form></body></html>
+"""
+
+
+def test_radios_without_labels_are_read_and_clicked_by_their_text(feed_page):
+    """Custom forms leave the radio's value as "on"; the options are the text
+    beside them."""
+    feed_page.set_content(RADIOS)
+    automator = BrowserAutomator()
+    automator.page = feed_page
+
+    group = automator._radio_groups()[0]
+    assert [o["label"] for o in group["options"]] == ["Yes", "No"]
+
+    class StubSolver:
+        def answer_question(self, question, options=None, **kwargs):
+            return "No"
+
+    automator.question_solver = StubSolver()
+    automator._answer_radio_groups({"questions_answered": [], "fields_filled": []}, "Dev", "Acme")
+    assert feed_page.evaluate("document.querySelectorAll('input')[1].checked") is True

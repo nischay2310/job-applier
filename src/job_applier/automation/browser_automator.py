@@ -1027,6 +1027,17 @@ class BrowserAutomator:
         # Other ATS (Greenhouse, Lever, Workday) render full-page forms.
         return self.page
 
+    def _form_evaluate(self, script: str, arg: Any = None) -> Any:
+        """Runs `root => ...` (or `(root, arg) => ...`) in the page against the
+        form. A dialog is a locator and takes the script as it is; on a
+        full-page form the root is the page body, which Page.evaluate would
+        otherwise leave as null."""
+        root = self._form_root()
+        if root is self.page:
+            call = f"({script})(document.body, {json.dumps(arg)})"
+            return self.page.evaluate(call)
+        return root.evaluate(script) if arg is None else root.evaluate(script, arg)
+
     def _dismiss_overlays(self) -> None:
         """Dismisses modal overlays (LinkedIn sign-in prompts) and cookie banners."""
         try:
@@ -1536,7 +1547,7 @@ class BrowserAutomator:
         """Reads every radio-button question on the current step as
         {question, required, options:[{value,label}], name}."""
         try:
-            return self._form_root().evaluate("""root => {
+            return self._form_evaluate("""root => {
                 const radios = Array.from(root.querySelectorAll("input[type=radio]"));
                 const groups = {};
                 for (const r of radios) {
@@ -1550,7 +1561,10 @@ class BrowserAutomator:
                         const fs = r.closest('fieldset');
                         const text = el => (el && el.innerText ? el.innerText.trim() : '');
                         const byId = id => text(id ? document.getElementById(id) : null);
-                        const group = r.closest("[role=radiogroup], [data-test-form-builder-radio-button-form-component], fieldset");
+                        // Plain forms have no fieldset or radiogroup: the box
+                        // around the options is the group.
+                        const group = r.closest("[role=radiogroup], [data-test-form-builder-radio-button-form-component], fieldset")
+                            || (r.parentElement && r.parentElement.parentElement);
                         // What the options say, so option text is never
                         // mistaken for the question - that turned real
                         // screeners into "Male Female I prefer not to specify".
@@ -1606,10 +1620,21 @@ class BrowserAutomator:
                             answered: false,
                         };
                     }
-                    const lbl = (r.labels && r.labels[0]) ? r.labels[0].innerText.trim() : '';
+                    // The option's text: its <label>, else whatever is written
+                    // next to it. A radio with no value attribute reports "on",
+                    // which is never the option's name.
+                    const own = el => (el && el.innerText ? el.innerText.trim() : '');
+                    let lbl = (r.labels && r.labels[0]) ? own(r.labels[0]) : '';
+                    if (!lbl) lbl = r.getAttribute('aria-label') || '';
+                    if (!lbl) lbl = own(r.nextElementSibling);
+                    if (!lbl && r.parentElement) {
+                        const around = own(r.parentElement);
+                        if (around.length <= 40) lbl = around;
+                    }
+                    if (!lbl && r.value && r.value !== 'on') lbl = r.value;
                     groups[name].options.push({
                         value: r.value || lbl,
-                        label: lbl || r.value || '',
+                        label: lbl,
                     });
                     if (r.checked) groups[name].answered = true;
                 }
@@ -1656,13 +1681,30 @@ class BrowserAutomator:
                 )
                 answer_lower = answer.lower()
                 answer_pattern = rf"\b{re.escape(answer_lower)}\b"
+                # The option the solver picked, by its position in the group:
+                # the radios come back in the same order as their labels.
+                labels = [(o.get("label") or "").strip().lower() for o in group["options"]]
+                chosen = next((i for i, text in enumerate(labels) if text == answer_lower), None)
+                if chosen is None:
+                    chosen = next(
+                        (i for i, text in enumerate(labels) if re.search(answer_pattern, text)),
+                        None,
+                    )
                 for i in range(radios.count()):
                     radio = radios.nth(i)
                     label = self._get_element_descriptor(radio)
                     value = (radio.get_attribute("value") or "").lower()
                     # Word-boundary match: "no" must not match inside "not sure".
-                    if re.search(answer_pattern, label) or answer_lower == value:
-                        radio.check()
+                    picked = (
+                        i == chosen
+                        if chosen is not None
+                        else re.search(answer_pattern, label) or answer_lower == value
+                    )
+                    if picked:
+                        try:
+                            radio.check()
+                        except Exception:
+                            radio.check(force=True)  # custom-styled, hidden input
                         report["questions_answered"].append(
                             {"question": question[:50], "answer": answer}
                         )
@@ -2169,7 +2211,7 @@ class BrowserAutomator:
         (Yes/No) instead of a free-text box."""
         try:
             return (
-                self._form_root().evaluate(
+                self._form_evaluate(
                     """(root, label) => {
                 const norm = s => (s || '').replace(/\\*/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
                 const target = norm(label);
@@ -2201,7 +2243,7 @@ class BrowserAutomator:
         concrete reason a wizard refuses to advance or submit."""
         try:
             return (
-                self._form_root().evaluate("""root => {
+                self._form_evaluate("""root => {
                 const out = [];
                 const els = root.querySelectorAll(
                     "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]), textarea, select"
@@ -2274,7 +2316,7 @@ class BrowserAutomator:
         """The step's field labels and headings - they change when the step
         does, but not when an error message appears on a rejected Next."""
         try:
-            return self._form_root().evaluate(
+            return self._form_evaluate(
                 "root => Array.from(root.querySelectorAll('label, legend, h3'))"
                 ".map(e => e.innerText.trim()).join('|') + '#' + Array.from("
                 "root.querySelectorAll('progress, [aria-valuenow]'))"

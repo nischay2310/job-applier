@@ -6,8 +6,12 @@ import re
 from job_applier.automation.candidate_profile import (  # type: ignore[import-not-found]
     CandidateProfile,
 )
+from job_applier.automation import local_model
+from job_applier.automation.question_facts import ProfileFacts, is_yes_no, top_skills
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
+    dismiss_pending,
     get_answer,
+    list_pending,
 )
 from job_applier.utils import get_project_root
 
@@ -21,6 +25,7 @@ class QuestionSolver:
         # Set per application so open-ended answers can refer to what the
         # posting actually asks for.
         self.job_description: str = ""
+        self.facts = ProfileFacts(profile)
 
     def answer_question(
         self,
@@ -28,6 +33,7 @@ class QuestionSolver:
         options: list[str] | None = None,
         job_title: str = "",
         company: str = "",
+        use_ai: bool = True,
     ) -> str:
         """Determines the best answer for an application question."""
         cleaned_q = question_text.strip().lower()
@@ -43,6 +49,12 @@ class QuestionSolver:
         for key, ans in self.profile.custom_answers.items():
             if key.lower() in cleaned_q:
                 return self._match_to_options(ans, options)
+
+        # 1c. What the profile and resume already say: location, notice
+        # period, years of experience, skills the resume really covers...
+        from_facts = self.facts.answer(question_text, options, self._match_to_options)
+        if from_facts:
+            return from_facts
 
         # 2. Rule-based heuristics for standard compliance/screening questions
         # Work authorization
@@ -164,10 +176,20 @@ class QuestionSolver:
                 default=self.profile.years_of_experience,
             )
 
+        if not use_ai:
+            return ""
+
         # 3. If Gemini is available, use AI to answer custom question
         ai_answer = self._answer_with_ai(question_text, options, job_title, company)
         if ai_answer:
             return ai_answer
+
+        # 3a. No Gemini key: the model on this computer can still answer
+        # open questions from the profile (never yes/no ones - those are
+        # claims about the candidate, so they come from the resume check).
+        local_answer = self._answer_with_local_model(question_text, options)
+        if local_answer:
+            return local_answer
 
         # 3b. Open-ended motivation questions ("What interests you about X?")
         # deserve a real written answer rather than being left blank.
@@ -178,6 +200,38 @@ class QuestionSolver:
         # unfilled and lets the caller flag it for the candidate's review,
         # instead of submitting a made-up "Yes" or an arbitrary first option.
         return ""
+
+    def _answer_with_local_model(self, question_text: str, options: list[str] | None) -> str:
+        cleaned = question_text.strip().lower()
+        if is_yes_no(cleaned, options) or not local_model.is_running():
+            return ""
+        p = self.profile
+        facts = [
+            f"Name: {p.full_name}",
+            f"Current role: {p.current_title} at {p.current_company}",
+            f"Years of experience: {p.years_of_experience}",
+            f"Location: {p.city}, {p.state}, {p.country}",
+            f"Notice period: {p.notice_period}",
+            f"Skills: {top_skills(self.facts.resume, 20)}",
+            f"Summary: {self.facts.resume.get('summary', '')}",
+        ]
+        lines = [
+            "Answer this job application question using ONLY the facts below. "
+            f"If the facts don't answer it, reply exactly {local_model.UNKNOWN}. "
+            "Reply with the answer only, under 40 words.",
+            "",
+            "Facts:",
+            *facts,
+            "",
+            f"Question: {question_text}",
+        ]
+        if options:
+            lines += ["Pick exactly one of:", *(f"- {o}" for o in options)]
+        reply = local_model.ask("\n".join(lines))
+        if not reply or local_model.UNKNOWN in reply.upper():
+            return ""
+        reply = reply.strip().strip("\"'")
+        return self._match_to_options(reply, options) if options else reply
 
     MOTIVATION_MARKERS = (
         "what interests you",
@@ -425,3 +479,19 @@ Output ONLY the final answer text with no extra commentary or formatting.
         except Exception as e:
             print(f"Notice: Gemini question answering fallback: {e}")
             return None
+
+
+def auto_answer_pending(solver: QuestionSolver) -> int:
+    """Clears pending questions the solver can answer now (profile and resume
+    facts only). Returns how many were cleared; the solver answers them
+    itself the next time they come up."""
+    cleared = 0
+    for item in list_pending():
+        options = item.get("options") or None
+        # Radios once recorded with the browser's placeholder value "on".
+        if options and all(o.strip().lower() == "on" for o in options):
+            options = None
+        answer = solver.answer_question(item["question"], options, use_ai=False)
+        if answer and dismiss_pending(item["key"]):
+            cleared += 1
+    return cleared
