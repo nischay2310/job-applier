@@ -87,3 +87,31 @@ def test_login_status_reads_cookie_names_from_the_automation_chrome():
     )
     assert status["instahyre"] and status["linkedin"]
     assert not status["google"]
+
+
+def test_auto_apply_settings_are_saved_and_read_back(tmp_path, monkeypatch):
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    from job_applier.web.app import app
+
+    monkeypatch.setattr(
+        sys.modules["job_applier.web.app"], "INSTAHYRE_WATCH_FILE", tmp_path / "watch.json"
+    )
+    client = TestClient(app)
+    assert client.get("/api/instahyre/watch").json()["enabled"] is False
+
+    settings = {
+        "enabled": True,
+        "every_minutes": 15,
+        "filters": {"include": ["devops"], "exclude": [], "max_jobs": 5},
+    }
+    assert client.post("/api/instahyre/watch", json=settings).status_code == 200
+    saved = client.get("/api/instahyre/watch").json()
+    assert saved["enabled"] is True
+    assert saved["every_minutes"] == 15
+    assert saved["filters"]["include"] == ["devops"]
+
+    too_often = {**settings, "every_minutes": 1}
+    assert client.post("/api/instahyre/watch", json=too_often).status_code == 422

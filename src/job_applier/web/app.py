@@ -1815,6 +1815,54 @@ def instahyre_login() -> dict[str, str]:
     }
 
 
+def run_instahyre_scan(filters: InstahyreScanRequest) -> None:
+    """One scan of the Instahyre feed in its own browser slot. Used by the
+    scan button and by the auto-apply watcher."""
+
+    def hud(step: str, message: str, level: str, details: dict[str, Any]) -> None:
+        set_automation_hud(
+            is_active=True,
+            company="Instahyre",
+            title="Scan & Apply",
+            step=step,
+            message=message,
+            level=level,
+            progress_pct=0,
+            details=details,
+        )
+
+    slot_id = acquire_browser_slot(timeout=300)
+    if slot_id is None:
+        log_event(
+            "Instahyre scan couldn't start: all browser slots busy.",
+            level="ERROR",
+            category="Auto-Apply",
+        )
+        return
+    automator = BrowserAutomator(
+        headless=False, profile_dir=ensure_slot_seeded(slot_id), status_callback=hud
+    )
+    try:
+        automator.start()
+        report = automator.run_instahyre_scan_and_apply(
+            max_jobs=filters.max_jobs,
+            include=filters.include,
+            exclude=filters.exclude,
+        )
+        log_event(
+            f"Instahyre scan complete: applied to {report['applied']} of "
+            f"{report['scanned']} jobs seen.",
+            level="SUCCESS",
+            category="Auto-Apply",
+        )
+    except Exception as e:
+        log_event(f"Instahyre scan ended with an error: {e}", level="ERROR", category="Auto-Apply")
+    finally:
+        automator.close()
+        set_automation_hud(is_active=False, step="idle", message="Instahyre scan complete", progress_pct=100)
+        release_browser_slot(slot_id)
+
+
 @app.post("/api/instahyre/scan-apply")
 def instahyre_scan_apply(
     background_tasks: BackgroundTasks, body: InstahyreScanRequest | None = None
@@ -1828,59 +1876,63 @@ def instahyre_scan_apply(
             status_code=409,
             detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now — please wait.",
         )
-
-    def instahyre_hud_callback(
-        step: str, message: str, level: str, details: dict[str, Any]
-    ) -> None:
-        set_automation_hud(
-            is_active=True,
-            company="Instahyre",
-            title="Scan & Apply",
-            step=step,
-            message=message,
-            level=level,
-            progress_pct=0,
-            details=details,
-        )
-
-    def run_instahyre():
-        slot_id = acquire_browser_slot(timeout=300)
-        if slot_id is None:
-            log_event(
-                "Instahyre scan couldn't start: all browser slots busy.",
-                level="ERROR",
-                category="Auto-Apply",
-            )
-            return
-        slot_dir = ensure_slot_seeded(slot_id)
-        automator = BrowserAutomator(
-            headless=False, profile_dir=slot_dir, status_callback=instahyre_hud_callback
-        )
-        try:
-            automator.start()
-            report = automator.run_instahyre_scan_and_apply(
-                max_jobs=filters.max_jobs,
-                include=filters.include,
-                exclude=filters.exclude,
-            )
-            log_event(
-                f"Instahyre scan complete: applied to {report['applied']} of "
-                f"{report['scanned']} jobs seen.",
-                level="SUCCESS",
-                category="Auto-Apply",
-            )
-        except Exception as e:
-            log_event(f"Instahyre scan ended with an error: {e}", level="ERROR", category="Auto-Apply")
-        finally:
-            automator.close()
-            set_automation_hud(is_active=False, step="idle", message="Instahyre scan complete", progress_pct=100)
-            release_browser_slot(slot_id)
-
-    background_tasks.add_task(run_instahyre)
+    background_tasks.add_task(run_instahyre_scan, filters)
     return {
         "status": "started",
         "message": "Scanning Instahyre and applying to every open job - watch live for progress.",
     }
+
+
+# Auto-apply: while switched on, the feed is checked every few minutes and
+# anything new gets applied to. Saved in a file so it survives a restart.
+INSTAHYRE_WATCH_FILE = get_project_root() / "data" / "instahyre_watch.json"
+INSTAHYRE_WATCH_CHECK_SECONDS = 30
+
+
+class InstahyreWatchSettings(BaseModel):
+    enabled: bool = False
+    every_minutes: int = Field(30, ge=5, le=720)
+    filters: InstahyreScanRequest = Field(default_factory=InstahyreScanRequest)
+
+
+def load_instahyre_watch() -> InstahyreWatchSettings:
+    try:
+        return InstahyreWatchSettings.model_validate_json(
+            INSTAHYRE_WATCH_FILE.read_text(encoding="utf-8")
+        )
+    except Exception:
+        return InstahyreWatchSettings()
+
+
+@app.get("/api/instahyre/watch")
+def get_instahyre_watch() -> InstahyreWatchSettings:
+    return load_instahyre_watch()
+
+
+@app.post("/api/instahyre/watch")
+def set_instahyre_watch(settings: InstahyreWatchSettings) -> InstahyreWatchSettings:
+    INSTAHYRE_WATCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    INSTAHYRE_WATCH_FILE.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+    log_event(
+        f"Instahyre auto-apply turned {'on' if settings.enabled else 'off'}"
+        + (f" (every {settings.every_minutes} min)." if settings.enabled else "."),
+        category="Auto-Apply",
+    )
+    return settings
+
+
+def instahyre_watch_loop() -> None:
+    last_run = 0.0
+    while True:
+        time.sleep(INSTAHYRE_WATCH_CHECK_SECONDS)
+        try:
+            settings = load_instahyre_watch()
+            due = time.time() - last_run >= settings.every_minutes * 60
+            if settings.enabled and due and not _browser_slot_queue.empty():
+                last_run = time.time()
+                run_instahyre_scan(settings.filters)
+        except Exception as e:
+            print(f"Notice: Instahyre auto-apply check failed: {e}")
 
 
 @app.get("/api/tracker")
@@ -2258,6 +2310,7 @@ def _auto_cleanup_loop() -> None:
 
 
 threading.Thread(target=_auto_cleanup_loop, daemon=True).start()
+threading.Thread(target=instahyre_watch_loop, daemon=True).start()
 
 
 # Mount compiled Angular single-page application if built

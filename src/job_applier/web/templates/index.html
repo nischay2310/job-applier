@@ -506,6 +506,7 @@
                       type="text"
                       x-model="instahyreFilters.include"
                       @input="saveInstahyreFilters()"
+                      @change="if (instahyreWatch.enabled) saveInstahyreWatch()"
                       placeholder="devops, sre, kubernetes"
                       class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
                     />
@@ -516,6 +517,7 @@
                       type="text"
                       x-model="instahyreFilters.exclude"
                       @input="saveInstahyreFilters()"
+                      @change="if (instahyreWatch.enabled) saveInstahyreWatch()"
                       placeholder="intern, sales"
                       class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
                     />
@@ -528,9 +530,34 @@
                       max="100"
                       x-model.number="instahyreFilters.max_jobs"
                       @input="saveInstahyreFilters()"
+                      @change="if (instahyreWatch.enabled) saveInstahyreWatch()"
                       class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
                     />
                   </label>
+                  <div class="pt-2 border-t border-slate-800 space-y-2">
+                    <label class="flex items-center gap-2 text-slate-200">
+                      <input
+                        type="checkbox"
+                        x-model="instahyreWatch.enabled"
+                        @change="saveInstahyreWatch()"
+                      />
+                      Apply automatically when new jobs appear
+                    </label>
+                    <label class="block">
+                      Check every (minutes)
+                      <input
+                        type="number"
+                        min="5"
+                        max="720"
+                        x-model.number="instahyreWatch.every_minutes"
+                        @change="saveInstahyreWatch()"
+                        class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      />
+                    </label>
+                    <p class="text-slate-500">
+                      Needs the dashboard running. Uses the filters above.
+                    </p>
+                  </div>
                 </div>
               </details>
 
@@ -2690,6 +2717,7 @@
           isLoading: false,
           isBatchRunning: false,
           isInstahyreScanning: false,
+          instahyreWatch: { enabled: false, every_minutes: 30 },
           instahyreFilters: (() => {
             const fallback = { include: "", exclude: "", max_jobs: 30 };
             try {
@@ -2786,6 +2814,7 @@
           sortDirection: "desc",
 
           init() {
+            this.loadInstahyreWatch();
             this.loadDashboardData();
             this.loadProfile();
             // Periodically refresh stats, pipeline, and automation HUD
@@ -3205,6 +3234,43 @@
               }
             } catch (e) {
               this.showToast("Error opening Instahyre login: " + e, "error");
+            }
+          },
+
+          async loadInstahyreWatch() {
+            try {
+              const res = await fetch("/api/instahyre/watch");
+              const data = await res.json();
+              this.instahyreWatch = { enabled: data.enabled, every_minutes: data.every_minutes };
+            } catch (e) {
+              // The panel just shows it as off.
+            }
+          },
+
+          async saveInstahyreWatch() {
+            const words = (text) => text.split(",").map((w) => w.trim()).filter(Boolean);
+            try {
+              const res = await fetch("/api/instahyre/watch", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  enabled: this.instahyreWatch.enabled,
+                  every_minutes: Math.min(720, Math.max(5, this.instahyreWatch.every_minutes || 30)),
+                  filters: {
+                    include: words(this.instahyreFilters.include || ""),
+                    exclude: words(this.instahyreFilters.exclude || ""),
+                    max_jobs: this.instahyreFilters.max_jobs || 30,
+                  },
+                }),
+              });
+              if (!res.ok) throw new Error(res.status);
+              this.showToast(
+                this.instahyreWatch.enabled
+                  ? `Instahyre auto-apply is on - checking every ${this.instahyreWatch.every_minutes} min.`
+                  : "Instahyre auto-apply is off.",
+              );
+            } catch (e) {
+              this.showToast("Could not save Instahyre auto-apply: " + e, "error");
             }
           },
 
