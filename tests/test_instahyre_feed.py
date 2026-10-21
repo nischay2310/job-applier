@@ -95,3 +95,19 @@ def test_max_jobs_stops_after_that_many_applications(feed_page):
 
     assert report["applied"] == 1
     assert len(feed_page.evaluate("window.clicked")) == 1
+
+
+def test_logged_in_but_nothing_new_is_not_called_a_login_problem(feed_page):
+    feed_page.set_content(
+        "<html><body><h1>No matching opportunities found :(</h1></body></html>"
+    )
+    automator = BrowserAutomator()
+    automator.page = feed_page
+    steps = []
+    automator._notify = lambda step, message, **kwargs: steps.append(step)
+
+    report = automator._instahyre_apply_on_feed(max_jobs=30)
+
+    assert report["applied"] == 0
+    assert "feed_empty" in steps
+    assert "login_required" not in steps

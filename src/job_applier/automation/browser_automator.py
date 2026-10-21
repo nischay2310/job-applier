@@ -2587,6 +2587,9 @@ class BrowserAutomator:
         text = text.strip().lower()
         if not text:
             return False
+        # The page also has a bulk "Apply to 5 jobs" button; that isn't a job.
+        if re.search(r"apply to \d+ jobs?", text):
+            return False
         if any(w in text for w in BrowserAutomator.INSTAHYRE_DONE_WORDS):
             return False
         return any(w in text for w in BrowserAutomator.INSTAHYRE_APPLY_WORDS)
@@ -2638,7 +2641,7 @@ class BrowserAutomator:
             self._notify(
                 "login_required",
                 "Could not reach the Instahyre opportunities feed - log in first with "
-                "'just login instahyre'.",
+                "'Open Instahyre Login' in Logins & Auth.",
                 level="ERROR",
             )
             return report
@@ -2669,12 +2672,20 @@ class BrowserAutomator:
             "form_detection", f"Found {len(cards)} job card(s) on the Instahyre feed."
         )
         if not cards:
-            self._notify(
-                "login_required",
-                "No jobs on the Instahyre feed. If you aren't logged in, run "
-                "'just login instahyre' first.",
-                level="WARN",
-            )
+            page_text = self.page.inner_text("body").lower()
+            if "no matching opportunities" in page_text:
+                self._notify(
+                    "feed_empty",
+                    "You're logged in, but Instahyre has no new matching jobs "
+                    "for you right now. Try again later.",
+                )
+            else:
+                self._notify(
+                    "login_required",
+                    "No jobs on the Instahyre feed. If you aren't logged in, "
+                    "use 'Open Instahyre Login' in Logins & Auth first.",
+                    level="WARN",
+                )
             return report
 
         for idx, card in enumerate(cards):
@@ -2742,6 +2753,8 @@ class BrowserAutomator:
             for i in range(count):
                 btn = buttons.nth(i)
                 try:
+                    if not btn.is_visible():
+                        continue
                     text = (btn.inner_text() or "").strip().lower()
                 except Exception:
                     continue
