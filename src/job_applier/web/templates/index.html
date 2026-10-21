@@ -3814,7 +3814,9 @@
                 method: "POST",
               });
               const data = await res.json();
-              if (res.ok) {
+              if (res.ok && !data.cookies_merged) {
+                this.showToast(data.message, "warning");
+              } else if (res.ok) {
                 this.showToast(
                   `Successfully imported ${data.cookies_merged} session cookies from desktop Chrome!`,
                   "success",

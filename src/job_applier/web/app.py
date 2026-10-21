@@ -1551,7 +1551,15 @@ def sync_chrome_cookies() -> dict[str, Any]:
     from job_applier.automation.auth_manager import AuthManager
 
     manager = AuthManager()
-    return manager.sync_desktop_cookies()
+    result = manager.sync_desktop_cookies()
+    if not result.get("cookies_merged"):
+        result["message"] = (
+            "No sessions could be copied from your desktop Chrome. Chrome encrypts "
+            "its saved logins so another browser can't reuse them. Sign in once in "
+            "the automation Chrome instead (for Instahyre: 'Open Instahyre Login') "
+            "- it remembers you after that."
+        )
+    return result
 
 
 @app.get("/api/applications/{app_id}/diagnostics")

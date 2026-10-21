@@ -53,3 +53,16 @@ def test_login_endpoint_reports_a_chrome_that_wont_start(monkeypatch):
     response = TestClient(app).post("/api/instahyre/login")
 
     assert response.status_code == 503
+
+
+def test_sync_from_desktop_chrome_says_so_when_nothing_was_copied(monkeypatch):
+    from job_applier.automation.auth_manager import AuthManager
+
+    monkeypatch.setattr(
+        AuthManager, "sync_desktop_cookies", lambda self: {"cookies_merged": 0}
+    )
+
+    response = TestClient(app).post("/api/auth/sync-chrome")
+
+    assert response.status_code == 200
+    assert "Open Instahyre Login" in response.json()["message"]
