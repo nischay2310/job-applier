@@ -1447,13 +1447,41 @@ def submit_verification_code(body: SubmitCodeRequest) -> dict[str, Any]:
 
 @app.get("/api/questions/pending")
 def get_pending_questions() -> dict[str, Any]:
-    """Screening questions the automation could not answer on its own."""
+    """Screening questions the automation could not answer on its own, each
+    with a quick suggested answer where the resume gives one."""
+    from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
+        QuestionSolver,
+        suggest_answer,
+    )
     from job_applier.automation.question_store import (  # type: ignore[import-not-found]
         list_answers,
         list_pending,
     )
 
-    return {"pending": list_pending(), "answered": list_answers()}
+    solver = QuestionSolver(load_candidate_profile())
+    pending = list_pending()
+    for item in pending:
+        item["suggestion"] = suggest_answer(
+            solver, item["question"], item.get("options") or None, use_model=False
+        )
+    return {"pending": pending, "answered": list_answers()}
+
+
+@app.post("/api/questions/suggest")
+def suggest_question_answer(body: QuestionDismissRequest) -> dict[str, str]:
+    """A fuller suggestion for one question, drafted by the local model when
+    the quick rules have nothing. Slow, so the dashboard asks one at a time."""
+    from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
+        QuestionSolver,
+        suggest_answer,
+    )
+    from job_applier.automation.question_store import list_pending  # type: ignore[import-not-found]
+
+    item = next((p for p in list_pending() if p["key"] == body.key), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="That question is no longer listed")
+    solver = QuestionSolver(load_candidate_profile())
+    return suggest_answer(solver, item["question"], item.get("options") or None)
 
 
 def clear_answerable_questions() -> int:

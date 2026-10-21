@@ -133,3 +133,22 @@ def test_unknown_questions_are_left_blank(solver):
 
 def test_experience_questions_without_do_you_are_still_yes_no(solver):
     assert ask(solver, "Have AWS services hands-on - ECS/Fargate, Lambda, IAM, VPC ?") == "Yes"
+
+
+def test_suggestions_come_with_a_reason_and_never_overreach(solver):
+    from job_applier.automation.question_solver import suggest_answer
+
+    yes_no = ["Yes", "No"]
+    known = suggest_answer(solver, "What is your nationality?", use_model=False)
+    assert known["answer"] == "Indian"
+
+    missing = suggest_answer(solver, "Do you hold a PMP or CISSP certificate?", yes_no, use_model=False)
+    assert missing["answer"] == "No"
+    assert "resume" in missing["reason"]
+
+    event = suggest_answer(solver, "Will you attend the walk in drive on Saturday?", yes_no, use_model=False)
+    assert event["answer"] == ""
+
+    nothing = suggest_answer(solver, "Describe your biggest challenge.", use_model=False)
+    assert nothing["answer"] == ""
+    assert nothing["reason"]

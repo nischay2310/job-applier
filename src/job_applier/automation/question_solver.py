@@ -7,7 +7,12 @@ from job_applier.automation.candidate_profile import (  # type: ignore[import-no
     CandidateProfile,
 )
 from job_applier.automation import local_model
-from job_applier.automation.question_facts import ProfileFacts, is_yes_no, top_skills
+from job_applier.automation.question_facts import (
+    ProfileFacts,
+    first_line,
+    is_yes_no,
+    top_skills,
+)
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     dismiss_pending,
     get_answer,
@@ -495,3 +500,62 @@ def auto_answer_pending(solver: QuestionSolver) -> int:
         if answer and dismiss_pending(item["key"]):
             cleared += 1
     return cleared
+
+
+STOP_WORDS = {
+    "about", "above", "across", "after", "along", "answer", "available", "before",
+    "being", "candidate", "company", "could", "describe", "does", "each", "every",
+    "experience", "following", "from", "have", "having", "hence", "including",
+    "into", "more", "most", "other", "please", "project", "projects", "ready",
+    "should", "some", "such", "than", "that", "their", "them", "there", "these",
+    "this", "those", "through", "using", "were", "what", "when", "where", "which",
+    "while", "will", "with", "within", "work", "worked", "would", "years", "your",
+}
+
+
+def suggest_answer(
+    solver: QuestionSolver,
+    question: str,
+    options: list[str] | None = None,
+    use_model: bool = True,
+) -> dict[str, str]:
+    """A suggested answer for a question the solver couldn't settle, with the
+    reason for it. Only a suggestion: the candidate decides."""
+    if options and all(o.strip().lower() == "on" for o in options):
+        options = None
+    answer = solver.answer_question(question, options, use_ai=False)
+    if answer:
+        return {"answer": answer, "reason": "From your profile and resume."}
+
+    q = first_line(question).lower()
+    if re.search(r"walk[- ]?in|\bdrive\b", q):
+        return {"answer": "", "reason": "A one-off event - check the date and place before answering."}
+
+    if is_yes_no(q, options):
+        words = sorted({w for w in re.findall(r"[a-z][a-z+#./-]{4,}", q) if w not in STOP_WORDS})
+        found = [w for w in words if w in solver.facts.resume_text]
+        if found and not (len(found) >= 2 and len(found) * 10 >= len(words) * 6):
+            return {
+                "answer": "",
+                "reason": f"Only partly in your resume (it mentions {', '.join(found[:3])}) - you decide.",
+            }
+        guess = "Yes" if found else "No"
+        picked = solver._match_to_options(guess, options)
+        if not picked:
+            return {"answer": "", "reason": "Pick the choice that is true for you."}
+        if found:
+            why = f"Your resume mentions {', '.join(found[:4])}."
+        else:
+            why = "Your resume doesn't show this."
+        return {"answer": picked, "reason": f"{why} Check it is true before using it."}
+
+    if use_model:
+        draft = solver._answer_with_local_model(question, options)
+        if draft:
+            return {
+                "answer": draft,
+                "reason": "Drafted by the model on this computer from your resume - check it.",
+            }
+    if options:
+        return {"answer": "", "reason": "None of the choices clearly fit your profile."}
+    return {"answer": "", "reason": "Nothing in your resume covers this - type your own."}
