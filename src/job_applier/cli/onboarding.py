@@ -36,7 +36,7 @@ def needs_onboarding() -> bool:
 
 
 def split_list(text: str) -> list[str]:
-    """"a, b ,c" -> ["a", "b", "c"]. Empty pieces are dropped."""
+    """ "a, b ,c" -> ["a", "b", "c"]. Empty pieces are dropped."""
     return [part.strip() for part in text.split(",") if part.strip()]
 
 
@@ -112,7 +112,16 @@ def read_resume(pdf_bytes: bytes) -> dict[str, Any]:
     return tidy_details(details) if isinstance(details, dict) else {}
 
 
-TEXT_FIELDS = ("name", "email", "phone", "location", "linkedin", "github", "languages", "summary")
+TEXT_FIELDS = (
+    "name",
+    "email",
+    "phone",
+    "location",
+    "linkedin",
+    "github",
+    "languages",
+    "summary",
+)
 
 
 def tidy_details(details: dict[str, Any]) -> dict[str, Any]:

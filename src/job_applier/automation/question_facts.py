@@ -23,7 +23,17 @@ Matcher = Callable[[str, list[str] | None], str]
 # Words that mean the same skill. A question mentioning any of them is asking
 # about that skill, and the resume covers it if it mentions any of them too.
 SKILL_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("aws", "ec2", "s3", "lambda", "cloudwatch", "eks", "ecs", "fargate", "codepipeline"),
+    (
+        "aws",
+        "ec2",
+        "s3",
+        "lambda",
+        "cloudwatch",
+        "eks",
+        "ecs",
+        "fargate",
+        "codepipeline",
+    ),
     ("azure", "aks", "azure devops"),
     ("gcp", "google cloud", "gke", "bigquery"),
     ("kubernetes", "k8s", "eks", "gke", "aks", "helm"),
@@ -33,11 +43,29 @@ SKILL_GROUPS: tuple[tuple[str, ...], ...] = (
     ("python", "bash", "powershell", "scripting", "shell"),
     ("linux", "unix"),
     ("monitoring", "alerting", "observability", "prometheus", "grafana", "datadog"),
-    ("networking", "vpc", "dns", "vpn", "tcp/ip", "load balancer", "load balancers", "firewall", "firewalls"),
+    (
+        "networking",
+        "vpc",
+        "dns",
+        "vpn",
+        "tcp/ip",
+        "load balancer",
+        "load balancers",
+        "firewall",
+        "firewalls",
+    ),
     ("iam", "security", "secrets", "vault"),
     ("sre", "site reliability", "devops", "platform engineering"),
     ("kafka", "redis", "mongodb", "postgresql", "cassandra"),
-    ("on-premise", "on-premises", "onpremises", "on premise", "on prem", "bare-metal", "bare metal"),
+    (
+        "on-premise",
+        "on-premises",
+        "onpremises",
+        "on premise",
+        "on prem",
+        "bare-metal",
+        "bare metal",
+    ),
     ("ansible",),
     ("gitlab",),
     ("jenkins",),
@@ -45,11 +73,29 @@ SKILL_GROUPS: tuple[tuple[str, ...], ...] = (
 )
 
 # An experience question about these needs more than a keyword match.
-NEEDS_HUMAN = ("lead ", "led ", "mentor", "certif", "architect", "manage a team", "managed a team")
+NEEDS_HUMAN = (
+    "lead ",
+    "led ",
+    "mentor",
+    "certif",
+    "architect",
+    "manage a team",
+    "managed a team",
+)
 
 EXPERIENCE_VERBS = (
-    "experience", "worked", "hands-on", "hands on", "implemented", "configured",
-    "designed", "deployed", "administered", "exposure", "familiar", "used ",
+    "experience",
+    "worked",
+    "hands-on",
+    "hands on",
+    "implemented",
+    "configured",
+    "designed",
+    "deployed",
+    "administered",
+    "exposure",
+    "familiar",
+    "used ",
 )
 
 
@@ -66,7 +112,7 @@ def has_word(text: str, word: str) -> bool:
 
 
 def notice_days(notice: str) -> int | None:
-    """"15 days" -> 15, "1 month" -> 30, "2 weeks" -> 14. None if unclear."""
+    """ "15 days" -> 15, "1 month" -> 30, "2 weeks" -> 14. None if unclear."""
     match = re.search(r"(\d+)\s*(day|week|month)?", notice.lower())
     if not match:
         return 0 if "immediate" in notice.lower() else None
@@ -86,7 +132,7 @@ def is_yes_no(question: str, options: list[str] | None) -> bool:
 
 
 def top_skills(resume: dict[str, Any], limit: int = 12) -> str:
-    """"Cloud: AWS (EC2, S3), GCP" -> "AWS, GCP": the first few of each line."""
+    """ "Cloud: AWS (EC2, S3), GCP" -> "AWS, GCP": the first few of each line."""
     names: list[str] = []
     skills = resume.get("skills") or []
     if isinstance(skills, dict):
@@ -113,7 +159,9 @@ class ProfileFacts:
         except Exception:
             return {}
 
-    def answer(self, question: str, options: list[str] | None, match: Matcher) -> str | None:
+    def answer(
+        self, question: str, options: list[str] | None, match: Matcher
+    ) -> str | None:
         """The answer, or None if these facts don't cover the question."""
         q = " ".join(first_line(question).replace("*", " ").lower().split())
         yes_no = is_yes_no(q, options)
@@ -152,7 +200,10 @@ class ProfileFacts:
         if yes_no and (asks_immediate or "within" in q):
             window = re.search(r"within\s*(?:the next\s*)?(\d+)\s*(day|week|month)", q)
             if window:
-                limit = int(window.group(1)) * {"day": 1, "week": 7, "month": 30}[window.group(2)]
+                limit = (
+                    int(window.group(1))
+                    * {"day": 1, "week": 7, "month": 30}[window.group(2)]
+                )
                 return yes_or_no(days <= limit)
             return yes_or_no(days == 0)
 
@@ -174,7 +225,9 @@ class ProfileFacts:
             number = re.search(r"(\d+)", text)
             if not number:
                 continue
-            value = int(number.group(1)) * (30 if "month" in text else 7 if "week" in text else 1)
+            value = int(number.group(1)) * (
+                30 if "month" in text else 7 if "week" in text else 1
+            )
             if re.search(r"less than|under|within|up to|<|max", text) and days <= value:
                 return option
             span = re.search(r"(\d+)\s*(?:-|–|to)\s*(\d+)", text)
@@ -203,7 +256,9 @@ class ProfileFacts:
             r"|how many years|how long have you",
             q,
         )
-        threshold = re.search(r"(\d+)\s*(?:\+|plus)?\s*(?:-|–|to)?\s*\d*\s*\+?\s*(?:years?|yrs?)", q)
+        threshold = re.search(
+            r"(\d+)\s*(?:\+|plus)?\s*(?:-|–|to)?\s*\d*\s*\+?\s*(?:years?|yrs?)", q
+        )
         about_age = re.search(r"\bold\b|\bage\b", q)
         if yes_no and threshold and not about_age:
             return yes_or_no(years >= int(threshold.group(1)))
@@ -213,10 +268,16 @@ class ProfileFacts:
 
     def _willingness(self, q, options, match, yes_no, yes_or_no):
         city = self.profile.city.lower()
-        aliases = {city, "bangalore", "bengaluru"} if city in ("bangalore", "bengaluru") else {city}
+        aliases = (
+            {city, "bangalore", "bengaluru"}
+            if city in ("bangalore", "bengaluru")
+            else {city}
+        )
         aliases.discard("")
 
-        here = re.search(r"(currently|presently|now)\s+(in|at|based in|located in|residing in)\b", q)
+        here = re.search(
+            r"(currently|presently|now)\s+(in|at|based in|located in|residing in)\b", q
+        )
         if here and yes_no:
             return yes_or_no(any(has_word(q, a) for a in aliases))
 
@@ -242,11 +303,16 @@ class ProfileFacts:
         if yes_no:
             return None
         p = self.profile
-        if has_word(q, "state") and not re.search(r"united states|statement|state of mind", q):
+        if has_word(q, "state") and not re.search(
+            r"united states|statement|state of mind", q
+        ):
             return match(p.state, options) if p.state else None
         if re.search(r"\bcity\b", q) and not re.search(r"\b(preferred|which)\b", q):
             return match(p.city, options) if p.city else None
-        if re.search(r"(current|present|your|where are you).*(location|located|based)|current city", q):
+        if re.search(
+            r"(current|present|your|where are you).*(location|located|based)|current city",
+            q,
+        ):
             if not p.city:
                 return None
             where = ", ".join(x for x in (p.city, p.state, p.country) if x)
@@ -259,7 +325,10 @@ class ProfileFacts:
             return None
         if re.search(r"nationality|citizen of|citizenship", q) and p.nationality:
             return match(p.nationality, options)
-        if re.search(r"employment status|currently employed|are you employed", q) and p.employment_status:
+        if (
+            re.search(r"employment status|currently employed|are you employed", q)
+            and p.employment_status
+        ):
             return match(p.employment_status, options)
         if "designation" in q or re.search(r"current (job )?(title|role|position)", q):
             title = p.current_title
@@ -268,13 +337,27 @@ class ProfileFacts:
             return match(title, options) if title else None
         if re.search(r"current (company|employer|organi[sz]ation)", q):
             return p.current_company or None
-        if re.search(r"technical skills|areas of expertise|primary skills|skill ?set|key skills", q) and not options:
+        if (
+            re.search(
+                r"technical skills|areas of expertise|primary skills|skill ?set|key skills",
+                q,
+            )
+            and not options
+        ):
             return top_skills(self.resume) or None
         if "english" in q and re.search(r"proficien|level|fluen|rate", q):
             return self._english(options, match)
-        if re.search(r"where did you (learn|hear|find)|how did you (hear|find|come)|learn about", q):
+        if re.search(
+            r"where did you (learn|hear|find)|how did you (hear|find|come)|learn about",
+            q,
+        ):
             return match("LinkedIn", options)
-        if q.strip("? ") in ("website", "portfolio", "personal website", "portfolio url"):
+        if q.strip("? ") in (
+            "website",
+            "portfolio",
+            "personal website",
+            "portfolio url",
+        ):
             return p.portfolio_url or p.github_url or p.linkedin_url or None
         return None
 
@@ -285,19 +368,28 @@ class ProfileFacts:
         found = match(level, options)
         if found:
             return found
-        for word in ("fluent", "professional", "native", "advanced", "full", "excellent"):
+        for word in (
+            "fluent",
+            "professional",
+            "native",
+            "advanced",
+            "full",
+            "excellent",
+        ):
             for option in options:
                 if word in option.lower():
                     return option
         return ""
 
     def _skill_question(self, q, options, match, yes_no, yes_or_no):
-        """"Do you have hands-on experience with X" - Yes only when the resume
+        """ "Do you have hands-on experience with X" - Yes only when the resume
         really covers most of what is named."""
         mentioned = [g for g in SKILL_GROUPS if any(has_word(q, w) for w in g)]
         if not mentioned or any(w in q for w in NEEDS_HUMAN):
             return None
-        covered = [g for g in mentioned if any(has_word(self.resume_text, w) for w in g)]
+        covered = [
+            g for g in mentioned if any(has_word(self.resume_text, w) for w in g)
+        ]
         if len(covered) * 2 <= len(mentioned):
             return None
 

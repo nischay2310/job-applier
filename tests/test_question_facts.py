@@ -53,8 +53,12 @@ def test_notice_days_understands_units():
 
 
 def test_years_of_experience_is_the_same_for_every_skill(solver):
-    assert ask(solver, "Yrs of exp. in CI/CD - GitHub Actions / Jenkins / GitLab ?") == "4"
-    assert ask(solver, "How many years of experience do you have with Kubernetes?") == "4"
+    assert (
+        ask(solver, "Yrs of exp. in CI/CD - GitHub Actions / Jenkins / GitLab ?") == "4"
+    )
+    assert (
+        ask(solver, "How many years of experience do you have with Kubernetes?") == "4"
+    )
 
 
 def test_years_threshold_questions_are_yes_or_no(solver):
@@ -69,7 +73,10 @@ def test_joining_questions_use_the_notice_period(solver):
     yes_no = ["Yes", "No"]
     assert ask(solver, "What is your notice period?") == "15 days"
     assert ask(solver, "Can you join us immediately?", yes_no) == "No"
-    assert ask(solver, "Are you an immediate joiner? Can join within 30 days?", yes_no) == "Yes"
+    assert (
+        ask(solver, "Are you an immediate joiner? Can join within 30 days?", yes_no)
+        == "Yes"
+    )
     assert ask(solver, "Can you join within 7 days?", yes_no) == "No"
 
 
@@ -82,7 +89,9 @@ def test_notice_period_picks_the_right_dropdown_choice(solver):
 
 def test_location_questions(solver):
     assert ask(solver, "State") == "Karnataka"
-    assert ask(solver, "What is your current location?") == "Bangalore, Karnataka, India"
+    assert (
+        ask(solver, "What is your current location?") == "Bangalore, Karnataka, India"
+    )
     yes_no = ["Yes", "No"]
     assert ask(solver, "Are you currently in Bangalore?", yes_no) == "Yes"
     assert ask(solver, "Are you currently in Pune?", yes_no) == "No"
@@ -90,20 +99,36 @@ def test_location_questions(solver):
 
 def test_onsite_and_relocation_follow_the_relocation_answer(solver):
     yes_no = ["Yes", "No"]
-    assert ask(solver, "Are you willing to work from Noida as required?", yes_no) == "Yes"
+    assert (
+        ask(solver, "Are you willing to work from Noida as required?", yes_no) == "Yes"
+    )
     assert ask(solver, "Comfortable for Delhi Gurugram as job location ?") == "Yes"
-    assert ask(solver, "Are you available for Face to Face interview in Bangalore office?", yes_no) == "Yes"
+    assert (
+        ask(
+            solver,
+            "Are you available for Face to Face interview in Bangalore office?",
+            yes_no,
+        )
+        == "Yes"
+    )
     # A dated walk-in drive is not a general willingness question.
-    assert not ask(solver, "Will you attend the walk in drive at Pune on 17th October?", yes_no)
+    assert not ask(
+        solver, "Will you attend the walk in drive at Pune on 17th October?", yes_no
+    )
 
 
 def test_about_you_questions(solver):
     assert ask(solver, "What is your nationality?") == "Indian"
     assert ask(solver, "What is your current employment status?") == "Employed"
-    assert ask(solver, "What is your current designation and company name?") == "Cloud Engineer, Acme"
+    assert (
+        ask(solver, "What is your current designation and company name?")
+        == "Cloud Engineer, Acme"
+    )
     assert ask(solver, "What is your proficiency level in English?") == "Fluent"
     assert ask(solver, "Where did you learn about Acme?") == "LinkedIn"
-    assert "AWS" in ask(solver, "What are your key technical skills and areas of expertise?")
+    assert "AWS" in ask(
+        solver, "What are your key technical skills and areas of expertise?"
+    )
 
 
 def test_english_level_picks_from_the_choices(solver):
@@ -113,17 +138,32 @@ def test_english_level_picks_from_the_choices(solver):
 
 def test_experience_is_yes_only_when_the_resume_covers_it(solver):
     yes_no = ["Yes", "No"]
-    assert ask(solver, "Do you have hands-on experience with Terraform or CloudFormation?", yes_no) == "Yes"
-    assert ask(solver, "Have you worked with Kubernetes and Docker in production?", yes_no) == "Yes"
+    assert (
+        ask(
+            solver,
+            "Do you have hands-on experience with Terraform or CloudFormation?",
+            yes_no,
+        )
+        == "Yes"
+    )
+    assert (
+        ask(solver, "Have you worked with Kubernetes and Docker in production?", yes_no)
+        == "Yes"
+    )
     # Not in the resume: left for the candidate, never guessed.
-    assert not ask(solver, "Do you have hands-on experience with VMware or Proxmox?", yes_no)
+    assert not ask(
+        solver, "Do you have hands-on experience with VMware or Proxmox?", yes_no
+    )
     # Leadership and certifications need a person to answer.
     assert not ask(solver, "Have you led a team of Kubernetes engineers?", yes_no)
 
 
 def test_skill_rating_is_strong_but_only_for_real_skills(solver):
     scale = ["1 - Beginner", "2", "3", "4 - Advanced", "5 - Expert"]
-    assert ask(solver, "How would you rate your Python scripting skills?", scale) == "4 - Advanced"
+    assert (
+        ask(solver, "How would you rate your Python scripting skills?", scale)
+        == "4 - Advanced"
+    )
     assert not ask(solver, "How would you rate your COBOL skills?", scale)
 
 
@@ -132,7 +172,10 @@ def test_unknown_questions_are_left_blank(solver):
 
 
 def test_experience_questions_without_do_you_are_still_yes_no(solver):
-    assert ask(solver, "Have AWS services hands-on - ECS/Fargate, Lambda, IAM, VPC ?") == "Yes"
+    assert (
+        ask(solver, "Have AWS services hands-on - ECS/Fargate, Lambda, IAM, VPC ?")
+        == "Yes"
+    )
 
 
 def test_suggestions_come_with_a_reason_and_never_overreach(solver):
@@ -142,13 +185,22 @@ def test_suggestions_come_with_a_reason_and_never_overreach(solver):
     known = suggest_answer(solver, "What is your nationality?", use_model=False)
     assert known["answer"] == "Indian"
 
-    missing = suggest_answer(solver, "Do you hold a PMP or CISSP certificate?", yes_no, use_model=False)
+    missing = suggest_answer(
+        solver, "Do you hold a PMP or CISSP certificate?", yes_no, use_model=False
+    )
     assert missing["answer"] == "No"
     assert "resume" in missing["reason"]
 
-    event = suggest_answer(solver, "Will you attend the walk in drive on Saturday?", yes_no, use_model=False)
+    event = suggest_answer(
+        solver,
+        "Will you attend the walk in drive on Saturday?",
+        yes_no,
+        use_model=False,
+    )
     assert event["answer"] == ""
 
-    nothing = suggest_answer(solver, "Describe your biggest challenge.", use_model=False)
+    nothing = suggest_answer(
+        solver, "Describe your biggest challenge.", use_model=False
+    )
     assert nothing["answer"] == ""
     assert nothing["reason"]

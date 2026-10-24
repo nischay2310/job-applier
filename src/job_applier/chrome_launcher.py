@@ -52,7 +52,12 @@ def find_chrome() -> str | None:
             if exe.exists():
                 return str(exe)
         return None
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+    for name in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ):
         found = shutil.which(name)
         if found:
             return found
@@ -73,9 +78,13 @@ def _stop_automation_chrome() -> None:
             f"Where-Object {{ $_.CommandLine -like '*{profile}*' }} | "
             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
         )
-        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script], capture_output=True
+        )
     else:
-        subprocess.run(["pkill", "-f", f"--user-data-dir={profile}"], capture_output=True)
+        subprocess.run(
+            ["pkill", "-f", f"--user-data-dir={profile}"], capture_output=True
+        )
     time.sleep(2)
 
 
@@ -140,11 +149,17 @@ def ensure_chrome() -> tuple[bool, str]:
         subprocess.Popen(
             ["cmd", "/c", "start", "", *args],
             creationflags=subprocess.CREATE_NO_WINDOW,
-            close_fds=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     else:
-        subprocess.Popen(args, start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            args,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     for _ in range(40):
         if cdp_ready():
@@ -157,7 +172,9 @@ def close_idle_windows(keep_target_ids: set[str]) -> int:
     """Closes automation Chrome tabs no running agent owns. One tab is always
     left open - closing the last one would quit Chrome."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3) as r:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3
+        ) as r:
             pages = [t for t in json.load(r) if t.get("type") == "page"]
     except Exception:
         return 0
@@ -167,7 +184,9 @@ def close_idle_windows(keep_target_ids: set[str]) -> int:
     closed = 0
     for t in idle:
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/close/{t['id']}", timeout=3)
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{CDP_PORT}/json/close/{t['id']}", timeout=3
+            )
             closed += 1
         except Exception:
             pass
@@ -212,7 +231,9 @@ def open_page(url: str) -> bool:
 def target_is_open(target_id: str) -> bool:
     """True while Chrome still lists this tab or window."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3) as r:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3
+        ) as r:
             return any(t.get("id") == target_id for t in json.load(r))
     except Exception:
         return False

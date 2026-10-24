@@ -163,7 +163,9 @@ def test_requests_for_another_hostname_are_refused():
     assert client.get("/api/health").status_code == 400
 
 
-def test_status_filter_does_not_list_applied_folders_under_another_status(monkeypatch, tmp_path):
+def test_status_filter_does_not_list_applied_folders_under_another_status(
+    monkeypatch, tmp_path
+):
     import sys
 
     from fastapi.testclient import TestClient
@@ -177,7 +179,9 @@ def test_status_filter_does_not_list_applied_folders_under_another_status(monkey
     monkeypatch.setattr(web, "output_applied_dir", tmp_path)
     client = TestClient(app)
 
-    waiting = client.get("/api/tracker", params={"status": "needs_decision"}).json()["records"]
+    waiting = client.get("/api/tracker", params={"status": "needs_decision"}).json()[
+        "records"
+    ]
     assert not any(r["job_url"] == "https://example.com/job/1" for r in waiting)
     applied = client.get("/api/tracker", params={"status": "applied"}).json()["records"]
     assert any(r["job_url"] == "https://example.com/job/1" for r in applied)

@@ -137,7 +137,9 @@ def test_radios_without_labels_are_read_and_clicked_by_their_text(feed_page):
             return "No"
 
     automator.question_solver = StubSolver()
-    automator._answer_radio_groups({"questions_answered": [], "fields_filled": []}, "Dev", "Acme")
+    automator._answer_radio_groups(
+        {"questions_answered": [], "fields_filled": []}, "Dev", "Acme"
+    )
     assert feed_page.evaluate("document.querySelectorAll('input')[1].checked") is True
 
 

@@ -18,7 +18,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(onboarding, "data_dir", lambda: tmp_path / "data")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     # Don't let a real .env bring a key back in.
-    monkeypatch.setattr(sys.modules["job_applier.web.app"], "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys.modules["job_applier.web.app"], "load_dotenv", lambda *a, **k: None
+    )
     db.init_db()
     return TestClient(app)
 
@@ -83,7 +85,9 @@ def test_new_user_is_asked_then_answers_are_saved(client, tmp_path):
 
 
 def test_name_is_required(client):
-    response = client.post("/api/onboarding", data={"details": json.dumps({"name": " "})})
+    response = client.post(
+        "/api/onboarding", data={"details": json.dumps({"name": " "})}
+    )
     assert response.status_code == 400
 
 
@@ -98,7 +102,8 @@ def test_resume_reader_says_so_when_ollama_is_missing(client, monkeypatch):
     monkeypatch.setattr(onboarding, "pdf_to_text", lambda _pdf: "Alex Example, Python")
     monkeypatch.setattr(onboarding, "OLLAMA_URL", "http://127.0.0.1:9")  # nothing there
     response = client.post(
-        "/api/onboarding/resume", files={"file": ("cv.pdf", b"%PDF-1.4", "application/pdf")}
+        "/api/onboarding/resume",
+        files={"file": ("cv.pdf", b"%PDF-1.4", "application/pdf")},
     )
     assert response.status_code == 422
     assert "Ollama" in response.json()["detail"]
@@ -123,7 +128,9 @@ def test_resume_text_goes_to_the_local_model_and_comes_back_as_details(monkeypat
         asked["body"] = json.loads(request.data)
         return FakeResponse()
 
-    monkeypatch.setattr(onboarding, "pdf_to_text", lambda _pdf: "Alex Example, Python dev")
+    monkeypatch.setattr(
+        onboarding, "pdf_to_text", lambda _pdf: "Alex Example, Python dev"
+    )
     monkeypatch.setattr(onboarding.urllib.request, "urlopen", fake_urlopen)
 
     assert onboarding.read_resume(b"%PDF")["name"] == "Alex Example"

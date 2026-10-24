@@ -28,4 +28,6 @@ def isolate_test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     test_csv = tmp_path / "test_tracker.csv"
     monkeypatch.setenv("JOB_APPLIER_DB_PATH", str(test_db))
     monkeypatch.setenv("JOB_APPLIER_TRACKER_PATH", str(test_csv))
-    monkeypatch.setenv("JOB_APPLIER_ANSWERS_PATH", str(tmp_path / "test_screening_answers.json"))
+    monkeypatch.setenv(
+        "JOB_APPLIER_ANSWERS_PATH", str(tmp_path / "test_screening_answers.json")
+    )

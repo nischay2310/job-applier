@@ -148,18 +148,14 @@ def automation_chrome_logins() -> dict[str, bool]:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as pw:
-                browser = pw.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{CDP_PORT}"
-                )
+                browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
                 cookies = [
                     (c["domain"], c["name"])
                     for context in browser.contexts
                     for c in context.cookies()
                 ]
                 urls = [
-                    page.url
-                    for context in browser.contexts
-                    for page in context.pages
+                    page.url for context in browser.contexts for page in context.pages
                 ]
             status = platforms_from_cookies(cookies)
             # Instahyre hands out a session cookie before anyone signs in, so

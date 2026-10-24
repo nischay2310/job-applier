@@ -1,0 +1,8 @@
+# Every change needs the owner's review. These paths can run code, deploy it
+# or hold secrets, so they are listed on their own to make that explicit.
+*                     @nischay2310
+/.github/             @nischay2310
+/deploy/              @nischay2310
+/Dockerfile           @nischay2310
+/compose.yaml         @nischay2310
+/scripts/             @nischay2310

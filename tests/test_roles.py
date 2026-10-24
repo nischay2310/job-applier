@@ -8,10 +8,14 @@ from job_applier import roles
 
 
 def test_title_matches_when_every_role_word_is_present():
-    assert roles.title_matches_roles("Senior DevOps Engineer (AWS)", ["DevOps Engineer"])
+    assert roles.title_matches_roles(
+        "Senior DevOps Engineer (AWS)", ["DevOps Engineer"]
+    )
     assert roles.title_matches_roles("Engineer - DevOps", ["DevOps Engineer"])
     assert roles.title_matches_roles("Python Developer", ["Python Dev"])
-    assert roles.title_matches_roles("Cloud Engineer 2", ["Cloud Architect", "Cloud Engineer"])
+    assert roles.title_matches_roles(
+        "Cloud Engineer 2", ["Cloud Architect", "Cloud Engineer"]
+    )
 
 
 def test_title_does_not_match_a_different_job():

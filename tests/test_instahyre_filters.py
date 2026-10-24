@@ -75,7 +75,9 @@ def test_instahyre_sign_in_pages_are_recognised():
     assert is_instahyre_sign_in(
         "https://accounts.google.com/v3/signin/identifier?redirect_uri=https%3A%2F%2Fwww.instahyre.com%2Fcomplete"
     )
-    assert not is_instahyre_sign_in("https://www.instahyre.com/candidate/opportunities/")
+    assert not is_instahyre_sign_in(
+        "https://www.instahyre.com/candidate/opportunities/"
+    )
     assert not is_instahyre_sign_in("https://www.linkedin.com/feed/")
 
 
@@ -97,7 +99,9 @@ def test_auto_apply_settings_are_saved_and_read_back(tmp_path, monkeypatch):
     from job_applier.web.app import app
 
     monkeypatch.setattr(
-        sys.modules["job_applier.web.app"], "INSTAHYRE_WATCH_FILE", tmp_path / "watch.json"
+        sys.modules["job_applier.web.app"],
+        "INSTAHYRE_WATCH_FILE",
+        tmp_path / "watch.json",
     )
     client = TestClient(app)
     assert client.get("/api/instahyre/watch").json()["enabled"] is False
@@ -121,8 +125,16 @@ def test_jobs_waiting_for_a_decision_show_up_in_the_tracker_and_stay_decided():
     from job_applier.tracker import load_tracker
     from job_applier.web.app import instahyre_job_url, record_instahyre_jobs
 
-    waiting = {"jobs": [{"title": "Backend Engineer", "company": "Acme", "status": "needs_decision",
-                         "reason": "doesn't match your roles"}]}
+    waiting = {
+        "jobs": [
+            {
+                "title": "Backend Engineer",
+                "company": "Acme",
+                "status": "needs_decision",
+                "reason": "doesn't match your roles",
+            }
+        ]
+    }
     record_instahyre_jobs(waiting)
     rows = load_tracker()
     row = rows[rows["job_url"] == instahyre_job_url("Acme", "Backend Engineer")].iloc[0]
@@ -131,11 +143,21 @@ def test_jobs_waiting_for_a_decision_show_up_in_the_tracker_and_stay_decided():
     # Once skipped, the next scan must not put it back on the waiting list.
     from job_applier.tracker import record_application
 
-    record_application("Acme", "Backend Engineer", instahyre_job_url("Acme", "Backend Engineer"),
-                       status="skipped", platform="Instahyre")
+    record_application(
+        "Acme",
+        "Backend Engineer",
+        instahyre_job_url("Acme", "Backend Engineer"),
+        status="skipped",
+        platform="Instahyre",
+    )
     record_instahyre_jobs(waiting)
     rows = load_tracker()
-    assert rows[rows["job_url"] == instahyre_job_url("Acme", "Backend Engineer")].iloc[0]["status"] == "skipped"
+    assert (
+        rows[rows["job_url"] == instahyre_job_url("Acme", "Backend Engineer")].iloc[0][
+            "status"
+        ]
+        == "skipped"
+    )
 
 
 def test_decision_buttons_skip_or_apply_to_one_job(monkeypatch):
@@ -148,18 +170,35 @@ def test_decision_buttons_skip_or_apply_to_one_job(monkeypatch):
 
     started = []
     monkeypatch.setattr(
-        sys.modules["job_applier.web.app"], "run_instahyre_scan", lambda filters: started.append(filters)
+        sys.modules["job_applier.web.app"],
+        "run_instahyre_scan",
+        lambda filters: started.append(filters),
     )
     client = TestClient(app)
     body = {"title": "Platform Engineer", "company": "Initech"}
 
-    assert client.post("/api/instahyre/decision", json={**body, "action": "maybe"}).status_code == 400
+    assert (
+        client.post(
+            "/api/instahyre/decision", json={**body, "action": "maybe"}
+        ).status_code
+        == 400
+    )
 
-    assert client.post("/api/instahyre/decision", json={**body, "action": "skip"}).status_code == 200
+    assert (
+        client.post(
+            "/api/instahyre/decision", json={**body, "action": "skip"}
+        ).status_code
+        == 200
+    )
     rows = load_tracker()
     assert "skipped" in set(rows[rows["title"] == "Platform Engineer"]["status"])
 
-    assert client.post("/api/instahyre/decision", json={**body, "action": "apply"}).status_code == 200
+    assert (
+        client.post(
+            "/api/instahyre/decision", json={**body, "action": "apply"}
+        ).status_code
+        == 200
+    )
     assert started[0].include == ["Platform Engineer"]
     assert started[0].max_jobs == 1
     assert started[0].only_matching_roles is False

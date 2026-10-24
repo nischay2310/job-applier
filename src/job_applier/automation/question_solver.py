@@ -120,7 +120,14 @@ class QuestionSolver:
         # Notice period / availability
         if any(
             w in cleaned_q
-            for w in ["notice", "how soon", "when can you start", "when can you join", "earliest joining", "availability"]
+            for w in [
+                "notice",
+                "how soon",
+                "when can you start",
+                "when can you join",
+                "earliest joining",
+                "availability",
+            ]
         ):
             return self._match_to_options(
                 self.profile.notice_period, options, default="1 month"
@@ -130,9 +137,18 @@ class QuestionSolver:
         # numbers - answering all of them with one figure was wrong.
         if any(
             w in cleaned_q
-            for w in ["salary", "compensation", "remuneration", "pay rate", "ctc", "package"]
+            for w in [
+                "salary",
+                "compensation",
+                "remuneration",
+                "pay rate",
+                "ctc",
+                "package",
+            ]
         ):
-            current = any(w in cleaned_q for w in ["current", "present", "existing", "last drawn"])
+            current = any(
+                w in cleaned_q for w in ["current", "present", "existing", "last drawn"]
+            )
             monthly = "month" in cleaned_q
             key = ("current" if current else "expected") + (
                 " monthly salary" if monthly else " ctc"
@@ -174,7 +190,9 @@ class QuestionSolver:
 
         # Years of experience with anything ("years of professional DevOps
         # experience", "experience with Python (years)") - same answer for any stack.
-        if re.search(r"\byears?\b.*\bexperience\b|\bexperience\b.*\byears?\b", cleaned_q):
+        if re.search(
+            r"\byears?\b.*\bexperience\b|\bexperience\b.*\byears?\b", cleaned_q
+        ):
             return self._match_to_options(
                 self.profile.years_of_experience,
                 options,
@@ -206,7 +224,9 @@ class QuestionSolver:
         # instead of submitting a made-up "Yes" or an arbitrary first option.
         return ""
 
-    def _answer_with_local_model(self, question_text: str, options: list[str] | None) -> str:
+    def _answer_with_local_model(
+        self, question_text: str, options: list[str] | None
+    ) -> str:
         cleaned = question_text.strip().lower()
         if is_yes_no(cleaned, options) or not local_model.is_running():
             return ""
@@ -340,9 +360,12 @@ class QuestionSolver:
         if target_lower in ["yes", "true", "y"]:
             for opt in options:
                 opt_lower = opt.strip().lower()
-                if opt_lower in ["yes", "i do", "i agree", "true"] or opt_lower.startswith(
-                    ("yes,", "yes ", "i do ")
-                ):
+                if opt_lower in [
+                    "yes",
+                    "i do",
+                    "i agree",
+                    "true",
+                ] or opt_lower.startswith(("yes,", "yes ", "i do ")):
                     return opt
         elif target_lower in ["no", "false", "n"]:
             for opt in options:
@@ -389,7 +412,9 @@ class QuestionSolver:
 
     @staticmethod
     def _match_number_to_range(target: str, options: list[str]) -> str:
-        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:\+|years?|yrs?)?\s*", target, re.I)
+        match = re.fullmatch(
+            r"\s*(\d+(?:\.\d+)?)\s*(?:\+|years?|yrs?)?\s*", target, re.I
+        )
         if not match:
             return ""
         value = float(match.group(1))
@@ -402,12 +427,16 @@ class QuestionSolver:
             span = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)", text)
             if span and float(span.group(1)) <= value <= float(span.group(2)):
                 return opt
-            floor = re.search(r"(\d+(?:\.\d+)?)\s*\+|(?:more than|over|above)\s*(\d+(?:\.\d+)?)", text)
+            floor = re.search(
+                r"(\d+(?:\.\d+)?)\s*\+|(?:more than|over|above)\s*(\d+(?:\.\d+)?)", text
+            )
             if floor:
                 low = float(floor.group(1) or floor.group(2))
                 if value >= low:
                     return opt
-            ceiling = re.search(r"(?:less than|under|below|up to)\s*(\d+(?:\.\d+)?)", text)
+            ceiling = re.search(
+                r"(?:less than|under|below|up to)\s*(\d+(?:\.\d+)?)", text
+            )
             if ceiling and value < float(ceiling.group(1)):
                 return opt
         return ""
@@ -503,13 +532,64 @@ def auto_answer_pending(solver: QuestionSolver) -> int:
 
 
 STOP_WORDS = {
-    "about", "above", "across", "after", "along", "answer", "available", "before",
-    "being", "candidate", "company", "could", "describe", "does", "each", "every",
-    "experience", "following", "from", "have", "having", "hence", "including",
-    "into", "more", "most", "other", "please", "project", "projects", "ready",
-    "should", "some", "such", "than", "that", "their", "them", "there", "these",
-    "this", "those", "through", "using", "were", "what", "when", "where", "which",
-    "while", "will", "with", "within", "work", "worked", "would", "years", "your",
+    "about",
+    "above",
+    "across",
+    "after",
+    "along",
+    "answer",
+    "available",
+    "before",
+    "being",
+    "candidate",
+    "company",
+    "could",
+    "describe",
+    "does",
+    "each",
+    "every",
+    "experience",
+    "following",
+    "from",
+    "have",
+    "having",
+    "hence",
+    "including",
+    "into",
+    "more",
+    "most",
+    "other",
+    "please",
+    "project",
+    "projects",
+    "ready",
+    "should",
+    "some",
+    "such",
+    "than",
+    "that",
+    "their",
+    "them",
+    "there",
+    "these",
+    "this",
+    "those",
+    "through",
+    "using",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "will",
+    "with",
+    "within",
+    "work",
+    "worked",
+    "would",
+    "years",
+    "your",
 }
 
 
@@ -529,10 +609,15 @@ def suggest_answer(
 
     q = first_line(question).lower()
     if re.search(r"walk[- ]?in|\bdrive\b", q):
-        return {"answer": "", "reason": "A one-off event - check the date and place before answering."}
+        return {
+            "answer": "",
+            "reason": "A one-off event - check the date and place before answering.",
+        }
 
     if is_yes_no(q, options):
-        words = sorted({w for w in re.findall(r"[a-z][a-z+#./-]{4,}", q) if w not in STOP_WORDS})
+        words = sorted(
+            {w for w in re.findall(r"[a-z][a-z+#./-]{4,}", q) if w not in STOP_WORDS}
+        )
         found = [w for w in words if w in solver.facts.resume_text]
         if found and not (len(found) >= 2 and len(found) * 10 >= len(words) * 6):
             return {
@@ -558,4 +643,7 @@ def suggest_answer(
             }
     if options:
         return {"answer": "", "reason": "None of the choices clearly fit your profile."}
-    return {"answer": "", "reason": "Nothing in your resume covers this - type your own."}
+    return {
+        "answer": "",
+        "reason": "Nothing in your resume covers this - type your own.",
+    }

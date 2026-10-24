@@ -100,7 +100,9 @@ app = FastAPI(
 # Behind a reverse proxy, list your own host and origin in these two variables.
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.environ.get("JOB_APPLIER_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    for h in os.environ.get("JOB_APPLIER_ALLOWED_HOSTS", "localhost,127.0.0.1").split(
+        ","
+    )
     if h.strip()
 ]
 ALLOWED_ORIGINS = [
@@ -156,6 +158,7 @@ def _running_port(default: int = 8000) -> int:
         except (IndexError, ValueError):
             pass
     return default
+
 
 QUEUE_EXITS = {
     "applied": output_applied_dir,
@@ -237,7 +240,9 @@ def ensure_slot_seeded(slot_id: int) -> Path:
     LinkedIn session cookies as the master profile, so every slot logs in
     the same as the main browser profile does."""
     slot_dir = get_slot_profile_dir(slot_id)
-    master_cookies = project_root / ".browser_profile" / "Default" / "Network" / "Cookies"
+    master_cookies = (
+        project_root / ".browser_profile" / "Default" / "Network" / "Cookies"
+    )
     slot_cookies = slot_dir / "Default" / "Network"
     slot_cookies.mkdir(parents=True, exist_ok=True)
     dest = slot_cookies / "Cookies"
@@ -402,7 +407,7 @@ class SubmitCodeRequest(BaseModel):
 class InstahyreScanRequest(BaseModel):
     include: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
-    max_jobs: int = Field(30, ge=1, le=100)
+    max_jobs: int = Field(default=30, ge=1, le=100)
     # Apply on its own only to jobs matching the scraper's roles; the rest
     # wait in the Tracker for a decision.
     only_matching_roles: bool = True
@@ -1004,7 +1009,8 @@ def cleanup_applications(body: CleanupRequest) -> dict[str, Any]:
     # Clearing everything mid-batch would pull folders out from under the
     # browser that's filling them.
     if body.older_than_days <= 0 and (
-        AUTOMATION_STATE.get("is_active") or _browser_slot_queue.qsize() < MAX_CONCURRENT_APPLIES
+        AUTOMATION_STATE.get("is_active")
+        or _browser_slot_queue.qsize() < MAX_CONCURRENT_APPLIES
     ):
         raise HTTPException(
             status_code=409,
@@ -1403,7 +1409,9 @@ def _close_leftover_windows() -> None:
 
 
 @app.post("/api/app/restart")
-def restart_app(force: bool = Query(False), full: bool = Query(False)) -> dict[str, str]:
+def restart_app(
+    force: bool = Query(False), full: bool = Query(False)
+) -> dict[str, str]:
     """Restarts the application.
 
     `full` brings the automation Chrome back with it, which is what you want
@@ -1414,7 +1422,10 @@ def restart_app(force: bool = Query(False), full: bool = Query(False)) -> dict[s
     restart.py does the job from outside - the process asking to restart
     can't be the one that brings itself back.
     """
-    if not force and (AUTOMATION_STATE.get("is_active") or _browser_slot_queue.qsize() < MAX_CONCURRENT_APPLIES):
+    if not force and (
+        AUTOMATION_STATE.get("is_active")
+        or _browser_slot_queue.qsize() < MAX_CONCURRENT_APPLIES
+    ):
         raise HTTPException(
             status_code=409,
             detail="An application is being submitted right now - wait for it to finish.",
@@ -1450,7 +1461,10 @@ def restart_app(force: bool = Query(False), full: bool = Query(False)) -> dict[s
 
     threading.Thread(target=bye, daemon=True).start()
     what = "Restarting everything" if full else "Restarting"
-    return {"status": "success", "message": f"{what} - the page comes back in a few seconds."}
+    return {
+        "status": "success",
+        "message": f"{what} - the page comes back in a few seconds.",
+    }
 
 
 @app.post("/api/chrome/connect")
@@ -1536,7 +1550,10 @@ def _clear_answerable_questions() -> None:
     try:
         cleared = clear_answerable_questions()
         if cleared:
-            log_event(f"Answered {cleared} waiting question(s) from your profile.", category="Questions")
+            log_event(
+                f"Answered {cleared} waiting question(s) from your profile.",
+                category="Questions",
+            )
     except Exception as e:
         print(f"Notice: could not re-check waiting questions: {e}")
 
@@ -1747,7 +1764,11 @@ def batch_apply(
         )
 
     def batch_hud_callback(
-        info: dict[str, Any], step: str, message: str, level: str, details: dict[str, Any]
+        info: dict[str, Any],
+        step: str,
+        message: str,
+        level: str,
+        details: dict[str, Any],
     ) -> None:
         step_progress = {
             "init": 10,
@@ -1781,9 +1802,7 @@ def batch_apply(
 
         slot_dir = ensure_slot_seeded(slot_id)
         try:
-            automator = BrowserAutomator(
-                headless=body.headless, profile_dir=slot_dir
-            )
+            automator = BrowserAutomator(headless=body.headless, profile_dir=slot_dir)
             try:
                 automator.start()
 
@@ -1826,8 +1845,10 @@ def batch_apply(
                             details={},
                         )
                         time.sleep(pause)
-                    automator.status_callback = lambda step, msg, level, details, info=info: batch_hud_callback(
-                        info, step, msg, level, details
+                    automator.status_callback = (
+                        lambda step, msg, level, details, info=info: batch_hud_callback(
+                            info, step, msg, level, details
+                        )
                     )
                     if body.mode == "autonomous":
                         status, detail = automator.run_autonomous_apply(
@@ -1870,7 +1891,10 @@ def batch_apply(
             finally:
                 automator.close()
                 set_automation_hud(
-                    is_active=False, step="idle", message="Batch complete", progress_pct=100
+                    is_active=False,
+                    step="idle",
+                    message="Batch complete",
+                    progress_pct=100,
                 )
         except Exception as e:
             print(f"Notice: Batch auto-apply ended with message: {e}")
@@ -1980,7 +2004,10 @@ def instahyre_decision(
         include=[body.title], max_jobs=1, only_matching_roles=False
     )
     background_tasks.add_task(run_instahyre_scan, only_this)
-    return {"status": "started", "message": "Applying on Instahyre - watch live for progress."}
+    return {
+        "status": "started",
+        "message": "Applying on Instahyre - watch live for progress.",
+    }
 
 
 @app.get("/api/instahyre/roles")
@@ -2040,10 +2067,19 @@ def run_instahyre_scan(filters: InstahyreScanRequest) -> None:
             category="Auto-Apply",
         )
     except Exception as e:
-        log_event(f"Instahyre scan ended with an error: {e}", level="ERROR", category="Auto-Apply")
+        log_event(
+            f"Instahyre scan ended with an error: {e}",
+            level="ERROR",
+            category="Auto-Apply",
+        )
     finally:
         automator.close()
-        set_automation_hud(is_active=False, step="idle", message="Instahyre scan complete", progress_pct=100)
+        set_automation_hud(
+            is_active=False,
+            step="idle",
+            message="Instahyre scan complete",
+            progress_pct=100,
+        )
         release_browser_slot(slot_id)
 
 
@@ -2075,8 +2111,10 @@ INSTAHYRE_WATCH_CHECK_SECONDS = 30
 
 class InstahyreWatchSettings(BaseModel):
     enabled: bool = False
-    every_minutes: int = Field(30, ge=5, le=720)
-    filters: InstahyreScanRequest = Field(default_factory=InstahyreScanRequest)
+    every_minutes: int = Field(default=30, ge=5, le=720)
+    filters: InstahyreScanRequest = Field(
+        default_factory=lambda: InstahyreScanRequest(max_jobs=30)
+    )
 
 
 def load_instahyre_watch() -> InstahyreWatchSettings:
@@ -2096,7 +2134,9 @@ def get_instahyre_watch() -> InstahyreWatchSettings:
 @app.post("/api/instahyre/watch")
 def set_instahyre_watch(settings: InstahyreWatchSettings) -> InstahyreWatchSettings:
     INSTAHYRE_WATCH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    INSTAHYRE_WATCH_FILE.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+    INSTAHYRE_WATCH_FILE.write_text(
+        settings.model_dump_json(indent=2), encoding="utf-8"
+    )
     log_event(
         f"Instahyre auto-apply turned {'on' if settings.enabled else 'off'}"
         + (f" (every {settings.every_minutes} min)." if settings.enabled else "."),
@@ -2143,7 +2183,11 @@ def get_tracker_data(status: str | None = Query(None)) -> dict[str, Any]:
             job_url = info["job_url"].strip()
             # If not tracked yet in CSV, add synthetic record - but only when
             # the page isn't filtered to some other status, as these are "applied".
-            if job_url and job_url not in applied_urls and (not status or status.lower() == "applied"):
+            if (
+                job_url
+                and job_url not in applied_urls
+                and (not status or status.lower() == "applied")
+            ):
                 records.append(
                     {
                         "timestamp": datetime.fromtimestamp(
@@ -2183,9 +2227,11 @@ def get_tracker_data(status: str | None = Query(None)) -> dict[str, Any]:
     # Best-effort Easy Apply tagging, derived from each record's own app folder
     for r in records:
         cv_path = r.get("cv_path", "").strip()
-        folder = Path(cv_path).parent if cv_path else None
+        record_folder = Path(cv_path).parent if cv_path else None
         r["easy_apply"] = (
-            _read_easy_apply_flag(folder) if folder and folder.exists() else "unknown"
+            _read_easy_apply_flag(record_folder)
+            if record_folder and record_folder.exists()
+            else "unknown"
         )
 
     return {
@@ -2231,7 +2277,9 @@ def import_applications_bundle(file: UploadFile = File(...)) -> dict[str, Any]:
         )
 
     if too_big(file, MAX_IMPORT_BYTES):
-        raise HTTPException(status_code=413, detail="That backup is too large (500 MB max).")
+        raise HTTPException(
+            status_code=413, detail="That backup is too large (500 MB max)."
+        )
 
     export_temp_dir = project_root / "output" / "exports"
     export_temp_dir.mkdir(parents=True, exist_ok=True)
@@ -2363,7 +2411,9 @@ def too_big(upload: UploadFile, limit: int) -> bool:
 def read_onboarding_resume(file: UploadFile = File(...)) -> dict[str, Any]:
     """Reads an uploaded resume PDF so the popup can pre-fill its answers."""
     if too_big(file, MAX_RESUME_BYTES):
-        raise HTTPException(status_code=413, detail="That PDF is too large (10 MB max).")
+        raise HTTPException(
+            status_code=413, detail="That PDF is too large (10 MB max)."
+        )
     pdf_bytes = file.file.read()
     if not pdf_bytes.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
@@ -2381,11 +2431,15 @@ async def finish_onboarding(
     try:
         answers = json.loads(details)
     except json.JSONDecodeError as err:
-        raise HTTPException(status_code=400, detail="Answers were not valid JSON.") from err
+        raise HTTPException(
+            status_code=400, detail="Answers were not valid JSON."
+        ) from err
     if not str(answers.get("name", "")).strip():
         raise HTTPException(status_code=400, detail="Please enter your name.")
     if resume and too_big(resume, MAX_RESUME_BYTES):
-        raise HTTPException(status_code=413, detail="That PDF is too large (10 MB max).")
+        raise HTTPException(
+            status_code=413, detail="That PDF is too large (10 MB max)."
+        )
     resume_pdf = await resume.read() if resume else None
     save_onboarding(answers, resume_pdf)
     return {"status": "success"}
