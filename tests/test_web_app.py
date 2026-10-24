@@ -136,3 +136,48 @@ def test_export_endpoint(client):
     assert res.status_code == 200
     assert res.headers["content-type"] == "application/zip"
     assert len(res.content) > 1000
+
+
+def test_other_websites_cannot_write_to_the_dashboard():
+    from fastapi.testclient import TestClient
+
+    from job_applier.web.app import app
+
+    client = TestClient(app)
+    refused = client.post(
+        "/api/app/restart", headers={"Origin": "https://evil.example"}
+    )
+    assert refused.status_code == 403
+
+    # The dashboard's own origin is let through.
+    allowed = client.get("/api/health", headers={"Origin": "http://127.0.0.1:8000"})
+    assert allowed.status_code == 200
+
+
+def test_requests_for_another_hostname_are_refused():
+    from fastapi.testclient import TestClient
+
+    from job_applier.web.app import app
+
+    client = TestClient(app, base_url="http://attacker.example")
+    assert client.get("/api/health").status_code == 400
+
+
+def test_status_filter_does_not_list_applied_folders_under_another_status(monkeypatch, tmp_path):
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    from job_applier.web.app import app
+
+    web = sys.modules["job_applier.web.app"]
+    folder = tmp_path / "Acme_Engineer"
+    folder.mkdir()
+    (folder / "APPLY_HERE.txt").write_text("https://example.com/job/1")
+    monkeypatch.setattr(web, "output_applied_dir", tmp_path)
+    client = TestClient(app)
+
+    waiting = client.get("/api/tracker", params={"status": "needs_decision"}).json()["records"]
+    assert not any(r["job_url"] == "https://example.com/job/1" for r in waiting)
+    applied = client.get("/api/tracker", params={"status": "applied"}).json()["records"]
+    assert any(r["job_url"] == "https://example.com/job/1" for r in applied)

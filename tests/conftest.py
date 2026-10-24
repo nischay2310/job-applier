@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# The test client calls the app as "testserver".
+os.environ.setdefault("JOB_APPLIER_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
 
 # Ensure virtual environment packages and src/ are in sys.path even when pytest is invoked globally
 root = Path(__file__).resolve().parents[1]

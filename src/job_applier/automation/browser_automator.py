@@ -28,6 +28,7 @@ from job_applier.automation.cloudflare import (  # type: ignore[import-not-found
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     record_pending,
 )
+from job_applier.roles import title_matches_roles
 from job_applier.chrome_launcher import (
     cdp_ready,
     close_target,
@@ -2641,6 +2642,7 @@ class BrowserAutomator:
         max_jobs: int = 30,
         include: list[str] | None = None,
         exclude: list[str] | None = None,
+        roles: list[str] | None = None,
     ) -> dict[str, Any]:
         """Scans Instahyre's candidate opportunities feed and clicks Apply on
         every job that still offers it, skipping ones already responded to.
@@ -2693,7 +2695,7 @@ class BrowserAutomator:
         except Exception:
             pass
 
-        return self._instahyre_apply_on_feed(max_jobs, include, exclude)
+        return self._instahyre_apply_on_feed(max_jobs, include, exclude, roles)
 
     @staticmethod
     def _instahyre_empty_report() -> dict[str, Any]:
@@ -2704,9 +2706,14 @@ class BrowserAutomator:
         max_jobs: int,
         include: list[str] | None = None,
         exclude: list[str] | None = None,
+        roles: list[str] | None = None,
     ) -> dict[str, Any]:
         """Clicks Apply on every open job card of the feed that is already
-        on screen and passes the keyword filters, up to max_jobs applications."""
+        on screen and passes the keyword filters, up to max_jobs applications.
+
+        With `roles` given, only jobs whose title matches one of them are
+        applied to; the others are reported as "needs_decision" so the
+        candidate can choose. Without it, every card that passes is applied."""
         report = self._instahyre_empty_report()
         cards = self._instahyre_job_cards()
         report["scanned"] = len(cards)
@@ -2737,18 +2744,32 @@ class BrowserAutomator:
                 card_text = (card.inner_text() or "").strip()
             except Exception:
                 card_text = ""
-            title_line = card_text.splitlines()[0] if card_text else f"Job {idx + 1}"
+            title_line, company = self._instahyre_card_title_and_company(card, card_text)
+            title_line = title_line or f"Job {idx + 1}"
 
             if not job_passes_filters(card_text, include, exclude):
                 report["skipped"] += 1
                 report["jobs"].append(
-                    {"title": title_line, "status": "skipped", "reason": "filtered out"}
+                    {"title": title_line, "company": company, "status": "skipped", "reason": "filtered out"}
                 )
                 continue
+
 
             button = self._instahyre_apply_button(card)
             if button is None:
                 report["skipped"] += 1
+                continue
+
+            if roles is not None and not title_matches_roles(title_line, roles):
+                report["skipped"] += 1
+                report["jobs"].append(
+                    {
+                        "title": title_line,
+                        "company": company,
+                        "status": "needs_decision",
+                        "reason": "doesn't match your roles",
+                    }
+                )
                 continue
 
             try:
@@ -2757,7 +2778,9 @@ class BrowserAutomator:
                 button.click(timeout=5000)
                 time.sleep(1.5)
                 report["applied"] += 1
-                report["jobs"].append({"title": title_line, "status": "applied"})
+                report["jobs"].append(
+                    {"title": title_line, "company": company, "status": "applied"}
+                )
                 self._notify(
                     "submitted",
                     f"Applied on Instahyre: {title_line}",
@@ -2766,7 +2789,7 @@ class BrowserAutomator:
             except Exception as e:
                 report["skipped"] += 1
                 report["jobs"].append(
-                    {"title": title_line, "status": "skipped", "reason": str(e)}
+                    {"title": title_line, "company": company, "status": "skipped", "reason": str(e)}
                 )
 
         self._notify(
@@ -2776,6 +2799,38 @@ class BrowserAutomator:
             level="SUCCESS" if report["applied"] else "WARN",
         )
         return report
+
+    @staticmethod
+    def _instahyre_card_title_and_company(card: Any, card_text: str) -> tuple[str, str]:
+        """The job title and company of a feed card: from its heading and
+        company elements when it has them, else from the first lines of text."""
+
+        def first_text(selector: str) -> str:
+            try:
+                text = card.locator(selector).first.inner_text(timeout=500)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                return lines[0] if lines else ""
+            except Exception:
+                return ""
+
+        lines = [line.strip() for line in card_text.splitlines() if line.strip()]
+        title = (
+            first_text("h1, h2, h3, h4")
+            or first_text("[class*='designation' i], [class*='title' i]")
+            or (lines[0] if lines else "")
+        )
+        company = first_text("[class*='company' i], [class*='employer' i]")
+        if not company:
+            # Button labels ("Apply", "Not interested") are not the company.
+            others = [
+                line
+                for line in lines
+                if line != title
+                and not BrowserAutomator._instahyre_is_apply_text(line)
+                and not any(w in line.lower() for w in BrowserAutomator.INSTAHYRE_DONE_WORDS)
+            ]
+            company = others[0] if others else ""
+        return title, company
 
     def _instahyre_job_cards(self) -> list[Any]:
         """Each job listing on the feed, as a locator scoped to that card.

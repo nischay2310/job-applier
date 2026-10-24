@@ -62,3 +62,20 @@ def test_release_window_closes_every_tab_including_popups(chrome):
 
     assert automator.page is None
     assert sorted(open_pages(port)) == sorted(tabs_before)
+
+
+def test_chrome_signin_prompt_is_switched_off_in_the_automation_profile(tmp_path):
+    import json
+
+    from job_applier.chrome_launcher import turn_off_chrome_signin
+
+    prefs_file = tmp_path / "Default" / "Preferences"
+    prefs_file.parent.mkdir(parents=True)
+    prefs_file.write_text(json.dumps({"homepage": "x", "signin": {"allowed": True}}))
+
+    assert turn_off_chrome_signin(tmp_path) is True
+    saved = json.loads(prefs_file.read_text())
+    assert saved["signin"]["allowed"] is False
+    assert saved["homepage"] == "x"  # everything else is left alone
+    assert turn_off_chrome_signin(tmp_path) is False  # nothing left to change
+    assert turn_off_chrome_signin(tmp_path / "missing") is False

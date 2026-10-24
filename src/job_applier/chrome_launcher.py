@@ -84,6 +84,27 @@ def _profile_in_use() -> bool:
     return lock.exists() or lock.is_symlink()
 
 
+def turn_off_chrome_signin(profile_dir: Path | None = None) -> bool:
+    """Switches off "Allow Chrome sign-in" in the automation profile.
+
+    Signing in to a site with Google makes Chrome open its own "Sign in to
+    Chrome" page (chrome://signin-dice-web-intercept) instead of going back
+    to the site, and that page can also stop the automation from attaching.
+    Only touches the profile's own settings, and only while Chrome is closed.
+    """
+    prefs_file = (profile_dir or PROFILE_DIR) / "Default" / "Preferences"
+    try:
+        prefs = json.loads(prefs_file.read_text(encoding="utf-8"))
+        signin = prefs.setdefault("signin", {})
+        if signin.get("allowed") is False:
+            return False
+        signin["allowed"] = False
+        prefs_file.write_text(json.dumps(prefs), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def ensure_chrome() -> tuple[bool, str]:
     """Makes sure the automation Chrome is running and controllable."""
     if cdp_ready():
@@ -97,10 +118,12 @@ def ensure_chrome() -> tuple[bool, str]:
         _stop_automation_chrome()
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    turn_off_chrome_signin()
     args = [
         chrome,
         f"--remote-debugging-port={CDP_PORT}",
         f"--user-data-dir={PROFILE_DIR}",
+        "--disable-sync",
         # Open the profile directly - with more than one profile in the
         # folder Chrome stops at its profile picker, which can't be driven.
         "--profile-directory=Default",

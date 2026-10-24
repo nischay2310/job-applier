@@ -534,6 +534,21 @@
                       class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
                     />
                   </label>
+                  <div class="pt-2 border-t border-slate-800 space-y-1.5">
+                    <label class="flex items-center gap-2 text-slate-200">
+                      <input
+                        type="checkbox"
+                        x-model="instahyreFilters.only_matching_roles"
+                        @change="saveInstahyreFilters(); if (instahyreWatch.enabled) saveInstahyreWatch()"
+                      />
+                      Auto-apply only to my scraper roles
+                    </label>
+                    <p class="text-slate-500">
+                      Roles:
+                      <span class="text-slate-300" x-text="instahyreRoles.length ? instahyreRoles.join(', ') : 'none yet - run the scraper once to set them'"></span>.
+                      Other jobs wait in the Tracker for your Apply or Skip.
+                    </p>
+                  </div>
                   <div class="pt-2 border-t border-slate-800 space-y-2">
                     <label class="flex items-center gap-2 text-slate-200">
                       <input
@@ -1103,6 +1118,7 @@
                 <option value="">All Statuses</option>
                 <option value="applied">Applied</option>
                 <option value="needs_review">Needs Review</option>
+                <option value="needs_decision">Needs your decision</option>
                 <option value="auto_filled">Auto-filled</option>
                 <option value="interviewing">Interviewing</option>
                 <option value="skipped">Skipped</option>
@@ -1272,9 +1288,10 @@
                               'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40': record.status === 'applied',
                               'bg-rose-500/20 text-rose-300 border border-rose-500/40': record.status === 'failed' || record.status === 'validation_failed',
                               'bg-amber-500/20 text-amber-300 border border-amber-500/40': record.status === 'needs_review',
-                              'bg-slate-700/40 text-slate-300 border border-slate-600/40': !['applied','failed','validation_failed','needs_review'].includes(record.status),
+                              'bg-sky-500/20 text-sky-300 border border-sky-500/40': record.status === 'needs_decision',
+                              'bg-slate-700/40 text-slate-300 border border-slate-600/40': !['applied','failed','validation_failed','needs_review','needs_decision'].includes(record.status),
                             }"
-                            x-text="(record.status || 'pending').replace('_',' ')"
+                            x-text="(record.status || 'pending').replaceAll('_',' ')"
                           ></span>
                           <select
                             :value="record.status"
@@ -1285,6 +1302,7 @@
                             <option value="auto_filled">Auto-filled</option>
                             <option value="failed">Failed</option>
                             <option value="needs_review">Needs Review</option>
+                            <option value="needs_decision">Needs your decision</option>
                             <option value="interviewing">Interviewing</option>
                             <option value="offered">Offered</option>
                             <option value="rejected">Rejected</option>
@@ -1325,7 +1343,28 @@
                           ></i>
                           <span>Reapply Now</span>
                         </button>
+                        <template x-if="record.status === 'needs_decision' && record.platform === 'Instahyre'">
+                          <span class="inline-flex gap-2">
+                            <button
+                              type="button"
+                              @click="decideInstahyre(record, 'apply')"
+                              class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition"
+                              title="Apply to this Instahyre job"
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              @click="decideInstahyre(record, 'skip')"
+                              class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 rounded-lg text-xs font-semibold transition"
+                              title="Don't apply to this job"
+                            >
+                              Skip
+                            </button>
+                          </span>
+                        </template>
                         <button
+                          x-show="!(record.status === 'needs_decision' && record.platform === 'Instahyre')"
                           type="button"
                           @click="sendBackToQueue(record)"
                           class="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-amber-200 border border-amber-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition shadow-sm"
@@ -2752,8 +2791,9 @@
           isBatchRunning: false,
           isInstahyreScanning: false,
           instahyreWatch: { enabled: false, every_minutes: 30 },
+          instahyreRoles: [],
           instahyreFilters: (() => {
-            const fallback = { include: "", exclude: "", max_jobs: 30 };
+            const fallback = { include: "", exclude: "", max_jobs: 30, only_matching_roles: true };
             try {
               return { ...fallback, ...JSON.parse(localStorage.getItem("instahyreFilters") || "{}") };
             } catch (e) {
@@ -2851,6 +2891,7 @@
 
           init() {
             this.loadInstahyreWatch();
+            this.loadInstahyreRoles();
             this.loadDashboardData();
             this.loadProfile();
             // Periodically refresh stats, pipeline, and automation HUD
@@ -3273,6 +3314,33 @@
             }
           },
 
+          async loadInstahyreRoles() {
+            try {
+              const res = await fetch("/api/instahyre/roles");
+              this.instahyreRoles = (await res.json()).roles || [];
+            } catch (e) {
+              // The panel just shows no roles.
+            }
+          },
+
+          async decideInstahyre(record, action) {
+            try {
+              const res = await fetch("/api/instahyre/decision", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title: record.title, company: record.company, action }),
+              });
+              const data = await res.json().catch(() => ({}));
+              this.showToast(
+                res.ok ? data.message : data.detail || "Could not do that",
+                res.ok ? "success" : "error",
+              );
+              this.loadTrackerData();
+            } catch (e) {
+              this.showToast("Error: " + e, "error");
+            }
+          },
+
           async loadInstahyreWatch() {
             try {
               const res = await fetch("/api/instahyre/watch");
@@ -3296,6 +3364,7 @@
                     include: words(this.instahyreFilters.include || ""),
                     exclude: words(this.instahyreFilters.exclude || ""),
                     max_jobs: this.instahyreFilters.max_jobs || 30,
+                    only_matching_roles: this.instahyreFilters.only_matching_roles !== false,
                   },
                 }),
               });
@@ -3322,6 +3391,7 @@
                   include: words(this.instahyreFilters.include || ""),
                   exclude: words(this.instahyreFilters.exclude || ""),
                   max_jobs: this.instahyreFilters.max_jobs || 30,
+                  only_matching_roles: this.instahyreFilters.only_matching_roles !== false,
                 }),
               });
               const data = await res.json().catch(() => ({}));

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,10 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from job_applier.automation.autofill_script import (  # type: ignore[import-not-found]
     save_autofill_assets,
@@ -74,6 +76,7 @@ from job_applier.sync import (  # type: ignore[import-not-found]
     export_bundle,
     import_bundle,
 )
+from job_applier.roles import chosen_roles, save_scraper_roles
 from job_applier.tracker import (  # type: ignore[import-not-found]
     get_tracker_file,
     get_tracker_stats,
@@ -90,17 +93,48 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# The dashboard has no login, so it must only answer to its own pages. A site
+# you happen to visit can make your browser call http://127.0.0.1:8000, so:
+#  - requests must name this machine in their Host header (stops DNS rebinding),
+#  - browsers' cross-site writes (POST/PUT/DELETE from another origin) are refused.
+# Behind a reverse proxy, list your own host and origin in these two variables.
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("JOB_APPLIER_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+]
+ALLOWED_ORIGINS = [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:3000",
+    "http://localhost:4200",
+    *[
+        o.strip()
+        for o in os.environ.get("JOB_APPLIER_ALLOWED_ORIGINS", "").split(",")
+        if o.strip()
+    ],
+]
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://localhost:3000",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def refuse_cross_site_writes(request, call_next):  # type: ignore[no-untyped-def]
+    origin = request.headers.get("origin")
+    writes = request.method in ("POST", "PUT", "PATCH", "DELETE")
+    if writes and origin and origin not in ALLOWED_ORIGINS:
+        return JSONResponse(
+            status_code=403, content={"detail": "Cross-site request refused."}
+        )
+    return await call_next(request)
+
 
 project_root = get_project_root()
 output_apps_dir = project_root / "output" / "applications"
@@ -369,6 +403,9 @@ class InstahyreScanRequest(BaseModel):
     include: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
     max_jobs: int = Field(30, ge=1, le=100)
+    # Apply on its own only to jobs matching the scraper's roles; the rest
+    # wait in the Tracker for a decision.
+    only_matching_roles: bool = True
 
 
 class AuthLoginRequest(BaseModel):
@@ -1872,6 +1909,86 @@ def instahyre_login() -> dict[str, str]:
     }
 
 
+def instahyre_job_url(company: str, title: str) -> str:
+    """Instahyre's feed has no per-job page we can rely on, so each job gets a
+    stable link back to the feed that names it - the Tracker keys rows on it."""
+    key = urllib.parse.quote_plus(f"{company}|{title}".lower())
+    return f"https://www.instahyre.com/candidate/opportunities/?job={key}"
+
+
+def record_instahyre_jobs(report: dict[str, Any]) -> None:
+    """Puts what a scan did in the Tracker: applied jobs, and the ones waiting
+    for the candidate's decision. A job already applied to or skipped is not
+    moved back to waiting by the next scan."""
+    tracker = load_tracker()
+    known = (
+        dict(zip(tracker["job_url"], tracker["status"], strict=False))
+        if not tracker.empty
+        else {}
+    )
+    for job in report.get("jobs", []):
+        status = job.get("status")
+        if status not in ("applied", "needs_decision"):
+            continue
+        url = instahyre_job_url(job.get("company", ""), job["title"])
+        if status == "needs_decision" and known.get(url) in ("applied", "skipped"):
+            continue
+        record_application(
+            company=job.get("company", "") or "Instahyre",
+            title=job["title"],
+            job_url=url,
+            status=status,
+            platform="Instahyre",
+            submission_type="instahyre_feed",
+            notes=job.get("reason", ""),
+        )
+
+
+class InstahyreDecision(BaseModel):
+    title: str
+    company: str = ""
+    action: str  # "apply" or "skip"
+
+
+@app.post("/api/instahyre/decision")
+def instahyre_decision(
+    body: InstahyreDecision, background_tasks: BackgroundTasks
+) -> dict[str, str]:
+    """The candidate's choice for a job that didn't match their roles."""
+    if body.action not in ("apply", "skip"):
+        raise HTTPException(status_code=400, detail="Action must be apply or skip.")
+    url = instahyre_job_url(body.company, body.title)
+    if body.action == "skip":
+        record_application(
+            company=body.company or "Instahyre",
+            title=body.title,
+            job_url=url,
+            status="skipped",
+            platform="Instahyre",
+            submission_type="instahyre_feed",
+            notes="You chose to skip this one.",
+        )
+        return {"status": "success", "message": "Skipped."}
+
+    if _browser_slot_queue.empty():
+        raise HTTPException(
+            status_code=409,
+            detail=f"All {MAX_CONCURRENT_APPLIES} browser slots are busy applying right now - please wait.",
+        )
+    # Apply to exactly this job: it is picked out of the feed by its title.
+    only_this = InstahyreScanRequest(
+        include=[body.title], max_jobs=1, only_matching_roles=False
+    )
+    background_tasks.add_task(run_instahyre_scan, only_this)
+    return {"status": "started", "message": "Applying on Instahyre - watch live for progress."}
+
+
+@app.get("/api/instahyre/roles")
+def get_instahyre_roles() -> dict[str, list[str]]:
+    """The roles the Instahyre auto-apply matches job titles against."""
+    return {"roles": chosen_roles()}
+
+
 def run_instahyre_scan(filters: InstahyreScanRequest) -> None:
     """One scan of the Instahyre feed in its own browser slot. Used by the
     scan button and by the auto-apply watcher."""
@@ -1901,11 +2018,21 @@ def run_instahyre_scan(filters: InstahyreScanRequest) -> None:
     )
     try:
         automator.start()
+        roles = chosen_roles() if filters.only_matching_roles else None
         report = automator.run_instahyre_scan_and_apply(
             max_jobs=filters.max_jobs,
             include=filters.include,
             exclude=filters.exclude,
+            roles=roles,
         )
+        record_instahyre_jobs(report)
+        waiting = sum(1 for j in report["jobs"] if j["status"] == "needs_decision")
+        if waiting:
+            log_event(
+                f"{waiting} Instahyre job(s) don't match your roles - "
+                "choose Apply or Skip for them in the Tracker.",
+                category="Auto-Apply",
+            )
         log_event(
             f"Instahyre scan complete: applied to {report['applied']} of "
             f"{report['scanned']} jobs seen.",
@@ -2014,8 +2141,9 @@ def get_tracker_data(status: str | None = Query(None)) -> dict[str, Any]:
                 continue
             info = parse_app_folder_info(folder)
             job_url = info["job_url"].strip()
-            # If not tracked yet in CSV, add synthetic record
-            if job_url and job_url not in applied_urls:
+            # If not tracked yet in CSV, add synthetic record - but only when
+            # the page isn't filtered to some other status, as these are "applied".
+            if job_url and job_url not in applied_urls and (not status or status.lower() == "applied"):
                 records.append(
                     {
                         "timestamp": datetime.fromtimestamp(
@@ -2101,6 +2229,9 @@ def import_applications_bundle(file: UploadFile = File(...)) -> dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="Only .zip backup bundles are supported."
         )
+
+    if too_big(file, MAX_IMPORT_BYTES):
+        raise HTTPException(status_code=413, detail="That backup is too large (500 MB max).")
 
     export_temp_dir = project_root / "output" / "exports"
     export_temp_dir.mkdir(parents=True, exist_ok=True)
@@ -2220,9 +2351,19 @@ def get_onboarding() -> dict[str, Any]:
     }
 
 
+MAX_RESUME_BYTES = 10 * 1024 * 1024
+MAX_IMPORT_BYTES = 500 * 1024 * 1024
+
+
+def too_big(upload: UploadFile, limit: int) -> bool:
+    return upload.size is not None and upload.size > limit
+
+
 @app.post("/api/onboarding/resume")
 def read_onboarding_resume(file: UploadFile = File(...)) -> dict[str, Any]:
     """Reads an uploaded resume PDF so the popup can pre-fill its answers."""
+    if too_big(file, MAX_RESUME_BYTES):
+        raise HTTPException(status_code=413, detail="That PDF is too large (10 MB max).")
     pdf_bytes = file.file.read()
     if not pdf_bytes.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Please upload a PDF file.")
@@ -2243,6 +2384,8 @@ async def finish_onboarding(
         raise HTTPException(status_code=400, detail="Answers were not valid JSON.") from err
     if not str(answers.get("name", "")).strip():
         raise HTTPException(status_code=400, detail="Please enter your name.")
+    if resume and too_big(resume, MAX_RESUME_BYTES):
+        raise HTTPException(status_code=413, detail="That PDF is too large (10 MB max).")
     resume_pdf = await resume.read() if resume else None
     save_onboarding(answers, resume_pdf)
     return {"status": "success"}
@@ -2253,6 +2396,7 @@ def trigger_pipeline(
     body: PipelineRunRequest, background_tasks: BackgroundTasks
 ) -> dict[str, Any]:
     """Triggers scraping + tailoring pipeline in background."""
+    save_scraper_roles(body.terms)
     with pipeline_lock:
         if PIPELINE_STATE["is_running"]:
             raise HTTPException(

@@ -139,3 +139,28 @@ def test_radios_without_labels_are_read_and_clicked_by_their_text(feed_page):
     automator.question_solver = StubSolver()
     automator._answer_radio_groups({"questions_answered": [], "fields_filled": []}, "Dev", "Acme")
     assert feed_page.evaluate("document.querySelectorAll('input')[1].checked") is True
+
+
+def test_only_jobs_matching_the_roles_are_applied_to_the_rest_wait(feed_page):
+    automator = BrowserAutomator()
+    automator.page = feed_page
+    automator._notify = lambda *args, **kwargs: None
+
+    report = automator._instahyre_apply_on_feed(max_jobs=30, roles=["DevOps Engineer"])
+
+    assert feed_page.evaluate("window.clicked") == ["DevOps Engineer / Apply"]
+    waiting = [job for job in report["jobs"] if job["status"] == "needs_decision"]
+    assert [job["title"] for job in waiting] == ["Backend Engineer"]
+    assert report["applied"] == 1
+
+
+def test_no_roles_given_means_everything_waits_for_a_decision(feed_page):
+    automator = BrowserAutomator()
+    automator.page = feed_page
+    automator._notify = lambda *args, **kwargs: None
+
+    report = automator._instahyre_apply_on_feed(max_jobs=30, roles=[])
+
+    assert feed_page.evaluate("window.clicked") == []
+    assert report["applied"] == 0
+    assert {job["status"] for job in report["jobs"]} == {"needs_decision"}
