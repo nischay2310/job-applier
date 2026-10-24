@@ -103,6 +103,8 @@ def test_form_autofill_headless(tmp_path):
         headless=True,
         use_persistent_profile=False,
     )
+    # A browser of its own: the default drives the desktop automation Chrome.
+    automator.use_host_chrome = False
 
     try:
         automator.start()
