@@ -148,7 +148,7 @@ def ensure_chrome() -> tuple[bool, str]:
     if IS_WINDOWS:
         subprocess.Popen(
             ["cmd", "/c", "start", "", *args],
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             close_fds=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

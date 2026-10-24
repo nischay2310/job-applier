@@ -1447,7 +1447,7 @@ def restart_app(
             subprocess.Popen(
                 ["cmd", "/c", "start", "", *cmd],
                 cwd=str(project_root),
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 close_fds=True,
             )
         else:

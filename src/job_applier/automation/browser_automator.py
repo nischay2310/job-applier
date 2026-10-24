@@ -1225,6 +1225,7 @@ class BrowserAutomator:
         # 1. Locate CV PDF and Cover Letter. On LinkedIn, always use the
         # candidate's real named resume rather than the per-job generated
         # one - the generated CV is only a tailoring fallback.
+        cv_pdf: Path | None
         own_resume = candidate_resume_path()
         if platform == "LinkedIn" and own_resume:
             cv_pdf = own_resume
