@@ -1,0 +1,40 @@
+name: Security
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9
+        with:
+          enable-cache: false
+
+      - name: Python dependencies with known vulnerabilities
+        run: |
+          uv export --frozen --no-hashes --no-emit-project > requirements.txt
+          uvx pip-audit -r requirements.txt --no-deps --disable-pip
+
+      - name: Static analysis (medium severity and up)
+        run: uvx bandit -r src -ll -q --skip B310,B608
+
+      - name: Frontend dependencies with known vulnerabilities
+        working-directory: frontend
+        # Critical only for now: the open high advisory is Angular SSR-only,
+        # and this app does not use server-side rendering.
+        run: npm audit --omit=dev --audit-level=critical

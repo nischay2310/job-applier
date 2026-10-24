@@ -26,6 +26,7 @@ The install scripts below install almost everything automatically. This section 
 | **uv** | Installs Python dependencies quickly and reliably | latest |
 | **Node.js + npm** | Builds the dashboard's web interface | 20+ |
 | **Google Chrome** | The browser the automation drives to fill in applications | latest |
+| **Ollama** + the `qwen2.5:3b` model | Reads your resume on your own computer when you set up (nothing is uploaded) | about 2 GB download |
 | **Google Gemini API key** | Powers the AI resume/cover-letter tailoring | free tier available |
 
 You do **not** need to install Playwright, Docker, or anything else by hand — the install scripts handle that too.
@@ -41,6 +42,8 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -       # adds Node
 sudo apt-get install -y nodejs
 curl -fsSL -o chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 sudo apt-get install -y ./chrome.deb
+curl -fsSL https://ollama.com/install.sh | sh                      # installs Ollama
+ollama pull qwen2.5:3b
 ```
 
 **macOS:**
@@ -49,6 +52,8 @@ sudo apt-get install -y ./chrome.deb
 brew install git python@3.12 node
 curl -LsSf https://astral.sh/uv/install.sh | sh                     # installs uv
 brew install --cask google-chrome
+brew install ollama && brew services start ollama
+ollama pull qwen2.5:3b
 ```
 
 **Windows (PowerShell, run as a normal user):**
@@ -57,6 +62,8 @@ winget install --id Git.Git -e
 winget install --id Python.Python.3.12 -e
 winget install --id OpenJS.NodeJS.LTS -e
 winget install --id Google.Chrome -e
+winget install --id Ollama.Ollama -e
+ollama pull qwen2.5:3b
 powershell -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"   # installs uv
 ```
 
@@ -96,7 +103,7 @@ If a script says "permission denied" on Mac/Linux, run `chmod +x scripts/*.sh` o
 
 When setup finishes, your browser opens automatically at **<http://127.0.0.1:8000>**. From there you can:
 
-1. Fill in your profile and resume details (or edit `data/master_resume.json` and `data/candidate_profile.json` directly).
+1. Check your profile and resume details. On the very first visit a popup asks you to upload your resume PDF (optional, read with your Gemini key) and answer a few basic questions. Your answers are saved in the database, and you can tick "start searching" to run the first job search straight away. You can edit `data/master_resume.json` and `data/candidate_profile.json` any time.
 2. Click **Scrape Jobs** to pull in new postings.
 3. Review each tailored resume/cover letter, then **Auto-Apply** or **Autonomous Submit**.
 

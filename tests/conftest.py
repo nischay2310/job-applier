@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# The test client calls the app as "testserver".
+os.environ.setdefault("JOB_APPLIER_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
 
 # Ensure virtual environment packages and src/ are in sys.path even when pytest is invoked globally
 root = Path(__file__).resolve().parents[1]
@@ -19,8 +23,11 @@ if str(src_dir) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def isolate_test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Guarantees that test runs never write mock data into the production database or CSV tracker."""
+    """Guarantees that test runs never touch the production database, CSV tracker or saved screening answers."""
     test_db = tmp_path / "test_job_applier.db"
     test_csv = tmp_path / "test_tracker.csv"
     monkeypatch.setenv("JOB_APPLIER_DB_PATH", str(test_db))
     monkeypatch.setenv("JOB_APPLIER_TRACKER_PATH", str(test_csv))
+    monkeypatch.setenv(
+        "JOB_APPLIER_ANSWERS_PATH", str(tmp_path / "test_screening_answers.json")
+    )

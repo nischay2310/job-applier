@@ -29,6 +29,7 @@ IS_WINDOWS = os.name == "nt"
 _spec = importlib.util.spec_from_file_location(
     "chrome_launcher", ROOT / "src" / "job_applier" / "chrome_launcher.py"
 )
+assert _spec is not None and _spec.loader is not None
 chrome_launcher = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(chrome_launcher)
 
@@ -39,7 +40,9 @@ def say(msg: str) -> None:
 
 def dashboard_up(port: int) -> bool:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2) as r:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/health", timeout=2
+        ) as r:
             return r.status == 200
     except Exception:
         return False
@@ -61,8 +64,9 @@ def kill_dashboard(port: int) -> None:
         ).stdout
         for line in listing.splitlines():
             if f":{port}" in line and "LISTENING" in line:
-                subprocess.run(["taskkill", "/F", "/PID", line.split()[-1]],
-                               capture_output=True)
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", line.split()[-1]], capture_output=True
+                )
     else:
         subprocess.run(["pkill", "-f", f"job_applier.cli.web_app.*--port {port}"])
     time.sleep(2)
@@ -75,19 +79,25 @@ def launch_start(port: int) -> None:
         subprocess.Popen(
             ["cmd", "/c", "start", "", *cmd],
             cwd=ROOT,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             close_fds=True,
         )
     else:
-        subprocess.Popen(cmd, cwd=ROOT, start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Restart Job Applier")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--full", action="store_true",
-                        help="restart the automation Chrome as well")
+    parser.add_argument(
+        "--full", action="store_true", help="restart the automation Chrome as well"
+    )
     args = parser.parse_args()
     os.chdir(ROOT)
 

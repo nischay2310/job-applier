@@ -42,6 +42,7 @@ RESTART_FULL_EXIT_CODE = 43
 _spec = importlib.util.spec_from_file_location(
     "chrome_launcher", ROOT / "src" / "job_applier" / "chrome_launcher.py"
 )
+assert _spec is not None and _spec.loader is not None
 chrome_launcher = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(chrome_launcher)
 
@@ -64,7 +65,10 @@ def install_dependencies() -> None:
         return
 
     stamp = ROOT / ".venv" / ".installed"
-    if stamp.exists() and stamp.stat().st_mtime >= (ROOT / "pyproject.toml").stat().st_mtime:
+    if (
+        stamp.exists()
+        and stamp.stat().st_mtime >= (ROOT / "pyproject.toml").stat().st_mtime
+    ):
         return
     if not venv_python().exists():
         say("Creating virtual environment...")
@@ -86,8 +90,12 @@ def http_ok(url: str, timeout: float = 2) -> bool:
 
 
 def start_chrome() -> None:
-    if not IS_WINDOWS and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        say("No desktop display detected - Chrome needs one so you can log in to LinkedIn.")
+    if not IS_WINDOWS and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        say(
+            "No desktop display detected - Chrome needs one so you can log in to LinkedIn."
+        )
     ok, message = chrome_launcher.ensure_chrome()
     say(message)
     if not ok:
@@ -114,8 +122,14 @@ def run_dashboard(port: int, reload: bool) -> None:
         JOB_APPLIER_SUPERVISED="1",
     )
     cmd = [
-        str(venv_python()), "-m", "job_applier.cli.web_app",
-        "--host", "127.0.0.1", "--port", str(port), "--no-browser",
+        str(venv_python()),
+        "-m",
+        "job_applier.cli.web_app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--no-browser",
     ]
     if not reload:
         cmd.append("--no-reload")
@@ -168,7 +182,13 @@ def stop_everything(port: int) -> None:
             for pid in pids:
                 subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
         else:
-            subprocess.run(["pkill", "-f", f"job_applier.cli.web_app --host 127.0.0.1 --port {port}"])
+            subprocess.run(
+                [
+                    "pkill",
+                    "-f",
+                    f"job_applier.cli.web_app --host 127.0.0.1 --port {port}",
+                ]
+            )
         say("Dashboard stopped.")
     else:
         say("Dashboard wasn't running.")
@@ -182,19 +202,28 @@ def stop_everything(port: int) -> None:
 
 def show_status(port: int) -> None:
     running = http_ok(f"http://127.0.0.1:{port}/api/health")
-    say(f"Dashboard:         {'running at http://127.0.0.1:' + str(port) if running else 'stopped'}")
+    say(
+        f"Dashboard:         {'running at http://127.0.0.1:' + str(port) if running else 'stopped'}"
+    )
     say(f"Automation Chrome: {'running' if chrome_launcher.cdp_ready() else 'stopped'}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start Job Applier")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--reload", action="store_true",
-                        help="restart on code edits (interrupts running applies)")
-    parser.add_argument("--no-chrome", action="store_true",
-                        help="don't open the automation Chrome")
-    parser.add_argument("--stop", action="store_true",
-                        help="stop the dashboard and the automation Chrome")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="restart on code edits (interrupts running applies)",
+    )
+    parser.add_argument(
+        "--no-chrome", action="store_true", help="don't open the automation Chrome"
+    )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="stop the dashboard and the automation Chrome",
+    )
     parser.add_argument("--status", action="store_true", help="show what's running")
     args = parser.parse_args()
 

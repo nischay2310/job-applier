@@ -19,10 +19,10 @@ function Write-Log($msg) {
 }
 
 $cdpPort = 9222
-$chromeUserData = "C:\Users\Nisch\AppData\Local\Google\Chrome\User Data"
-$chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-$plaintextCookiesPath = "C:\Users\Nisch\AppData\Local\Temp\linkedin_cookies_plaintext.json"
-$extractScript = "C:\Users\Nisch\AppData\Local\Temp\extract_cookies_via_cdp.py"
+$chromeUserData = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
+$chromePath = Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"
+$plaintextCookiesPath = Join-Path $env:TEMP "linkedin_cookies_plaintext.json"
+$extractScript = Join-Path $env:TEMP "extract_cookies_via_cdp.py"
 $containerName = "job-applier-app-1"
 
 $cdpUp = $false
@@ -71,5 +71,10 @@ if (-not $containerRunning) {
 }
 
 docker exec $containerName mkdir -p /app/data | Out-Null
-docker cp $plaintextCookiesPath "${containerName}:/app/data/linkedin_cookies.json" | Out-Null
-Write-Log "Synced valid LinkedIn session cookies into the container."
+try {
+    docker cp $plaintextCookiesPath "${containerName}:/app/data/linkedin_cookies.json" | Out-Null
+    Write-Log "Synced valid LinkedIn session cookies into the container."
+} finally {
+    # The session cookies are secrets: never leave them lying in Temp.
+    Remove-Item $plaintextCookiesPath -Force -ErrorAction SilentlyContinue
+}

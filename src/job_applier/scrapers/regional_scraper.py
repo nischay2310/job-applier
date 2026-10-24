@@ -484,7 +484,7 @@ def scrape_jooble(
         try:
             resp = requests.post(
                 url,
-                json=payload,
+                json=payload,  # type: ignore[arg-type]
                 headers={"Content-Type": "application/json"},
                 timeout=8,
             )

@@ -489,6 +489,93 @@
                 <span x-text="isInstahyreScanning ? 'Scanning Instahyre...' : 'Scan & Apply: Instahyre'"></span>
               </button>
 
+              <!-- Instahyre scan filters -->
+              <details class="relative">
+                <summary
+                  class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-medium cursor-pointer select-none list-none"
+                  title="Choose which Instahyre jobs the scan applies to"
+                >
+                  Instahyre Filters
+                </summary>
+                <div
+                  class="absolute z-30 mt-2 w-72 p-4 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl space-y-3 text-xs text-slate-300"
+                >
+                  <label class="block">
+                    Only jobs mentioning (comma separated)
+                    <input
+                      type="text"
+                      x-model="instahyreFilters.include"
+                      @input="saveInstahyreFilters()"
+                      @change="if (instahyreWatch.enabled) saveInstahyreWatch()"
+                      placeholder="devops, sre, kubernetes"
+                      class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    />
+                  </label>
+                  <label class="block">
+                    Skip jobs mentioning (comma separated)
+                    <input
+                      type="text"
+                      x-model="instahyreFilters.exclude"
+                      @input="saveInstahyreFilters()"
+                      @change="if (instahyreWatch.enabled) saveInstahyreWatch()"
+                      placeholder="intern, sales"
+                      class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    />
+                  </label>
+                  <label class="block">
+                    Apply to at most
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      x-model.number="instahyreFilters.max_jobs"
+                      @input="saveInstahyreFilters()"
+                      @change="if (instahyreWatch.enabled) saveInstahyreWatch()"
+                      class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                    />
+                  </label>
+                  <div class="pt-2 border-t border-slate-800 space-y-1.5">
+                    <label class="flex items-center gap-2 text-slate-200">
+                      <input
+                        type="checkbox"
+                        x-model="instahyreFilters.only_matching_roles"
+                        @change="saveInstahyreFilters(); if (instahyreWatch.enabled) saveInstahyreWatch()"
+                      />
+                      Auto-apply only to my scraper roles
+                    </label>
+                    <p class="text-slate-500">
+                      Roles:
+                      <span class="text-slate-300" x-text="instahyreRoles.length ? instahyreRoles.join(', ') : 'none yet - run the scraper once to set them'"></span>.
+                      Other jobs wait in the Tracker for your Apply or Skip.
+                    </p>
+                  </div>
+                  <div class="pt-2 border-t border-slate-800 space-y-2">
+                    <label class="flex items-center gap-2 text-slate-200">
+                      <input
+                        type="checkbox"
+                        x-model="instahyreWatch.enabled"
+                        @change="saveInstahyreWatch()"
+                      />
+                      Apply automatically when new jobs appear
+                    </label>
+                    <label class="block">
+                      Check every (minutes)
+                      <input
+                        type="number"
+                        min="5"
+                        max="720"
+                        x-model.number="instahyreWatch.every_minutes"
+                        @change="saveInstahyreWatch()"
+                        class="mt-1 w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                      />
+                    </label>
+                    <p class="text-slate-500">
+                      Needs the dashboard running. Uses the filters above.
+                    </p>
+                  </div>
+                </div>
+              </details>
+
               <!-- Cleanup Button -->
               <button
                 type="button"
@@ -823,6 +910,40 @@
                       Not a real question, remove it
                     </button>
                   </div>
+                  <!-- A suggested answer worked out from the profile and
+                       resume - only ever a suggestion. -->
+                  <div
+                    x-show="q.suggestion && (q.suggestion.answer || q.suggestion.reason || suggestingKey === q.key)"
+                    class="mb-2.5 px-3 py-2 rounded-lg bg-sky-500/10 border border-sky-500/30 text-xs"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <p class="text-slate-300">
+                        <template x-if="q.suggestion && q.suggestion.answer">
+                          <span>
+                            <span class="text-sky-300 font-semibold">Suggested:</span>
+                            <span class="text-white" x-text="q.suggestion.answer"></span>
+                          </span>
+                        </template>
+                        <span
+                          x-show="suggestingKey === q.key"
+                          class="text-sky-300"
+                        >Thinking it through on this computer...</span>
+                        <span
+                          x-show="suggestingKey !== q.key"
+                          class="block text-slate-400 mt-0.5"
+                          x-text="q.suggestion ? q.suggestion.reason : ''"
+                        ></span>
+                      </p>
+                      <button
+                        type="button"
+                        x-show="q.suggestion && q.suggestion.answer"
+                        @click="useSuggestion(q)"
+                        class="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-[11px] font-semibold flex-shrink-0"
+                      >
+                        Use this
+                      </button>
+                    </div>
+                  </div>
                   <div class="flex items-center gap-2 flex-wrap">
                     <!-- Radios as radios, a dropdown as a dropdown: the same
                          shape the application form itself asked in. -->
@@ -997,6 +1118,7 @@
                 <option value="">All Statuses</option>
                 <option value="applied">Applied</option>
                 <option value="needs_review">Needs Review</option>
+                <option value="needs_decision">Needs your decision</option>
                 <option value="auto_filled">Auto-filled</option>
                 <option value="interviewing">Interviewing</option>
                 <option value="skipped">Skipped</option>
@@ -1166,9 +1288,10 @@
                               'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40': record.status === 'applied',
                               'bg-rose-500/20 text-rose-300 border border-rose-500/40': record.status === 'failed' || record.status === 'validation_failed',
                               'bg-amber-500/20 text-amber-300 border border-amber-500/40': record.status === 'needs_review',
-                              'bg-slate-700/40 text-slate-300 border border-slate-600/40': !['applied','failed','validation_failed','needs_review'].includes(record.status),
+                              'bg-sky-500/20 text-sky-300 border border-sky-500/40': record.status === 'needs_decision',
+                              'bg-slate-700/40 text-slate-300 border border-slate-600/40': !['applied','failed','validation_failed','needs_review','needs_decision'].includes(record.status),
                             }"
-                            x-text="(record.status || 'pending').replace('_',' ')"
+                            x-text="(record.status || 'pending').replaceAll('_',' ')"
                           ></span>
                           <select
                             :value="record.status"
@@ -1179,6 +1302,7 @@
                             <option value="auto_filled">Auto-filled</option>
                             <option value="failed">Failed</option>
                             <option value="needs_review">Needs Review</option>
+                            <option value="needs_decision">Needs your decision</option>
                             <option value="interviewing">Interviewing</option>
                             <option value="offered">Offered</option>
                             <option value="rejected">Rejected</option>
@@ -1219,7 +1343,28 @@
                           ></i>
                           <span>Reapply Now</span>
                         </button>
+                        <template x-if="record.status === 'needs_decision' && record.platform === 'Instahyre'">
+                          <span class="inline-flex gap-2">
+                            <button
+                              type="button"
+                              @click="decideInstahyre(record, 'apply')"
+                              class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition"
+                              title="Apply to this Instahyre job"
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              @click="decideInstahyre(record, 'skip')"
+                              class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 rounded-lg text-xs font-semibold transition"
+                              title="Don't apply to this job"
+                            >
+                              Skip
+                            </button>
+                          </span>
+                        </template>
                         <button
+                          x-show="!(record.status === 'needs_decision' && record.platform === 'Instahyre')"
                           type="button"
                           @click="sendBackToQueue(record)"
                           class="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-amber-200 border border-amber-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition shadow-sm"
@@ -2537,6 +2682,31 @@
               </button>
             </div>
 
+            <!-- Instahyre (opens its login in the automation Chrome, which the scan uses) -->
+            <div
+              class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between"
+            >
+              <div class="flex items-center space-x-3">
+                <div
+                  class="w-9 h-9 rounded-xl bg-orange-500/20 border border-orange-500/30 flex items-center justify-center text-orange-400 font-bold text-xs"
+                >
+                  IH
+                </div>
+                <div>
+                  <h4 class="text-sm font-semibold text-white">Instahyre</h4>
+                  <p class="text-xs text-slate-400">
+                    Sign in once in the Chrome window that opens - it's remembered
+                  </p>
+                </div>
+              </div>
+              <button
+                @click="openInstahyreLogin()"
+                class="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition"
+              >
+                Open Instahyre Login
+              </button>
+            </div>
+
             <!-- eJobs -->
             <div
               class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between"
@@ -2620,6 +2790,16 @@
           isLoading: false,
           isBatchRunning: false,
           isInstahyreScanning: false,
+          instahyreWatch: { enabled: false, every_minutes: 30 },
+          instahyreRoles: [],
+          instahyreFilters: (() => {
+            const fallback = { include: "", exclude: "", max_jobs: 30, only_matching_roles: true };
+            try {
+              return { ...fallback, ...JSON.parse(localStorage.getItem("instahyreFilters") || "{}") };
+            } catch (e) {
+              return fallback;
+            }
+          })(),
           isApplying: {},
           searchQuery: "",
           easyApplyOnlyFilter: false,
@@ -2688,6 +2868,8 @@
           },
           loginRequiredBanner: false,
           pendingQuestions: [],
+          modelSuggestions: {},
+          suggestingKey: "",
           questionDrafts: {},
           verificationCodeInput: "",
           isSubmittingCode: false,
@@ -2708,6 +2890,8 @@
           sortDirection: "desc",
 
           init() {
+            this.loadInstahyreWatch();
+            this.loadInstahyreRoles();
             this.loadDashboardData();
             this.loadProfile();
             // Periodically refresh stats, pipeline, and automation HUD
@@ -3108,11 +3292,108 @@
             }
           },
 
+          saveInstahyreFilters() {
+            try {
+              localStorage.setItem("instahyreFilters", JSON.stringify(this.instahyreFilters));
+            } catch (e) {
+              // Filters just won't be remembered.
+            }
+          },
+
+          async openInstahyreLogin() {
+            try {
+              const res = await fetch("/api/instahyre/login", { method: "POST" });
+              const data = await res.json().catch(() => ({}));
+              if (res.ok) {
+                this.showToast(data.message);
+              } else {
+                this.showToast(data.detail || "Could not open the Instahyre login", "error");
+              }
+            } catch (e) {
+              this.showToast("Error opening Instahyre login: " + e, "error");
+            }
+          },
+
+          async loadInstahyreRoles() {
+            try {
+              const res = await fetch("/api/instahyre/roles");
+              this.instahyreRoles = (await res.json()).roles || [];
+            } catch (e) {
+              // The panel just shows no roles.
+            }
+          },
+
+          async decideInstahyre(record, action) {
+            try {
+              const res = await fetch("/api/instahyre/decision", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title: record.title, company: record.company, action }),
+              });
+              const data = await res.json().catch(() => ({}));
+              this.showToast(
+                res.ok ? data.message : data.detail || "Could not do that",
+                res.ok ? "success" : "error",
+              );
+              this.loadTrackerData();
+            } catch (e) {
+              this.showToast("Error: " + e, "error");
+            }
+          },
+
+          async loadInstahyreWatch() {
+            try {
+              const res = await fetch("/api/instahyre/watch");
+              const data = await res.json();
+              this.instahyreWatch = { enabled: data.enabled, every_minutes: data.every_minutes };
+            } catch (e) {
+              // The panel just shows it as off.
+            }
+          },
+
+          async saveInstahyreWatch() {
+            const words = (text) => text.split(",").map((w) => w.trim()).filter(Boolean);
+            try {
+              const res = await fetch("/api/instahyre/watch", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  enabled: this.instahyreWatch.enabled,
+                  every_minutes: Math.min(720, Math.max(5, this.instahyreWatch.every_minutes || 30)),
+                  filters: {
+                    include: words(this.instahyreFilters.include || ""),
+                    exclude: words(this.instahyreFilters.exclude || ""),
+                    max_jobs: this.instahyreFilters.max_jobs || 30,
+                    only_matching_roles: this.instahyreFilters.only_matching_roles !== false,
+                  },
+                }),
+              });
+              if (!res.ok) throw new Error(res.status);
+              this.showToast(
+                this.instahyreWatch.enabled
+                  ? `Instahyre auto-apply is on - checking every ${this.instahyreWatch.every_minutes} min.`
+                  : "Instahyre auto-apply is off.",
+              );
+            } catch (e) {
+              this.showToast("Could not save Instahyre auto-apply: " + e, "error");
+            }
+          },
+
           async scanInstahyre() {
             this.isInstahyreScanning = true;
             this.showToast("Opening Instahyre and scanning for jobs to apply to...", "info");
             try {
-              const res = await fetch("/api/instahyre/scan-apply", { method: "POST" });
+              const words = (text) => text.split(",").map((w) => w.trim()).filter(Boolean);
+              const res = await fetch("/api/instahyre/scan-apply", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  include: words(this.instahyreFilters.include || ""),
+                  exclude: words(this.instahyreFilters.exclude || ""),
+                  max_jobs: this.instahyreFilters.max_jobs || 30,
+                  only_matching_roles: this.instahyreFilters.only_matching_roles !== false,
+                }),
+              });
               const data = await res.json().catch(() => ({}));
               if (res.ok) {
                 this.showToast(data.message || "Instahyre scan started - watch live for progress.");
@@ -3597,11 +3878,53 @@
               const res = await fetch("/api/questions/pending");
               if (res.ok) {
                 const data = await res.json();
-                this.pendingQuestions = data.pending || [];
+                this.pendingQuestions = (data.pending || []).map((q) => ({
+                  ...q,
+                  suggestion: this.modelSuggestions[q.key] || q.suggestion,
+                }));
                 this.$nextTick(() => lucide.createIcons());
+                this.fetchModelSuggestions();
               }
             } catch (e) {
               console.error("Error loading pending questions:", e);
+            }
+          },
+
+          // The quick suggestions arrive with the list. The questions they
+          // couldn't cover are drafted by the local model, one at a time.
+          async fetchModelSuggestions() {
+            if (this.suggestingKey) return;
+            for (const q of [...this.pendingQuestions]) {
+              if ((q.suggestion && q.suggestion.answer) || this.modelSuggestions[q.key]) continue;
+              this.suggestingKey = q.key;
+              try {
+                const res = await fetch("/api/questions/suggest", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ key: q.key }),
+                });
+                if (res.ok) {
+                  const suggestion = await res.json();
+                  this.modelSuggestions[q.key] = suggestion;
+                  this.pendingQuestions = this.pendingQuestions.map((p) =>
+                    p.key === q.key ? { ...p, suggestion } : p,
+                  );
+                }
+              } catch (e) {
+                // No suggestion for this one; the question is still answerable.
+              }
+              this.suggestingKey = "";
+            }
+          },
+
+          useSuggestion(q) {
+            const answer = q.suggestion.answer;
+            // Choices and short answers are saved straight away; a longer
+            // written draft goes into the box so it can be edited first.
+            if ((q.options || []).length > 0 || answer.length <= 30) {
+              this.saveQuestionAnswer(q.question, answer);
+            } else {
+              this.questionDrafts[q.key] = answer;
             }
           },
 
@@ -3705,7 +4028,9 @@
                 method: "POST",
               });
               const data = await res.json();
-              if (res.ok) {
+              if (res.ok && !data.cookies_merged) {
+                this.showToast(data.message, "warning");
+              } else if (res.ok) {
                 this.showToast(
                   `Successfully imported ${data.cookies_merged} session cookies from desktop Chrome!`,
                   "success",

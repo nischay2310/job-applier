@@ -16,6 +16,7 @@ class CandidateProfile:
     email: str = ""
     phone: str = ""
     city: str = ""
+    state: str = ""
     country: str = ""
     address: str = ""
     postal_code: str = ""
@@ -32,6 +33,9 @@ class CandidateProfile:
     education_degree: str = ""
 
     # Common Screening Answers
+    nationality: str = ""
+    employment_status: str = ""  # e.g. "Employed"
+    english_level: str = ""  # e.g. "Fluent"
     work_authorization: str = "Yes"  # Authorized to work in the country
     sponsorship_required: str = "No"  # Requires visa sponsorship
     notice_period: str = "Negotiable / Standard"

@@ -84,6 +84,15 @@ def init_db(custom_path: Path | None = None) -> None:
                     );
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS onboarding_answers (
+                        question TEXT PRIMARY KEY,
+                        answer TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    """
+                )
         finally:
             conn.close()
 
@@ -398,6 +407,43 @@ def migrate_csv_and_disk_to_db(custom_path: Path | None = None) -> int:
                 imported_count += 1
 
     return imported_count
+
+
+def save_onboarding_answers(
+    answers: dict[str, str], custom_path: Path | None = None
+) -> None:
+    """Stores the answers from the first-run questionnaire, one row each."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with _DB_LOCK:
+        conn = get_connection(custom_path)
+        try:
+            with conn:
+                for question, answer in answers.items():
+                    conn.execute(
+                        """
+                        INSERT INTO onboarding_answers (question, answer, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(question) DO UPDATE SET
+                            answer = excluded.answer,
+                            updated_at = excluded.updated_at
+                        """,
+                        (question, answer, now),
+                    )
+        finally:
+            conn.close()
+
+
+def get_onboarding_answers(custom_path: Path | None = None) -> dict[str, str]:
+    """Everything the user answered in the first-run questionnaire."""
+    with _DB_LOCK:
+        conn = get_connection(custom_path)
+        try:
+            rows = conn.execute(
+                "SELECT question, answer FROM onboarding_answers"
+            ).fetchall()
+        finally:
+            conn.close()
+    return {row["question"]: row["answer"] for row in rows}
 
 
 # Initialize database automatically on import

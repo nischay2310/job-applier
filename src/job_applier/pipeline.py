@@ -176,9 +176,7 @@ def run_application_pipeline(
                     processed_urls.add(job_url_raw)
                     continue
 
-                over_cap, cap_reason = exceeds_experience_cap(
-                    f"{job_title} {jd_text}"
-                )
+                over_cap, cap_reason = exceeds_experience_cap(f"{job_title} {jd_text}")
                 if over_cap:
                     log_event(
                         f"Skipping over-experience job: {company} - {job_title} ({cap_reason})",
@@ -374,6 +372,9 @@ def run_application_pipeline(
                             company=company,
                             job_title=job_title,
                         )
+                    # Done with this job - close its window now rather than
+                    # leaving it open until the whole run ends.
+                    automator.release_window()
 
                     if status == "applied":
                         target_dir = applied_base / app_dir.name

@@ -18,49 +18,136 @@ import re
 # What a question is about. Keys are arbitrary tags; the point is that two
 # questions sharing a tag set are asking the same thing.
 TOPICS: dict[str, tuple[str, ...]] = {
-    "salary": ("salary", "ctc", "compensation", "remuneration", "package",
-               "pay", "lpa", "stipend"),
-    "notice": ("notice", "join", "joining", "onboard", "start date",
-               "available to start", "how soon"),
+    "salary": (
+        "salary",
+        "ctc",
+        "compensation",
+        "remuneration",
+        "package",
+        "pay",
+        "lpa",
+        "stipend",
+    ),
+    "notice": (
+        "notice",
+        "join",
+        "joining",
+        "onboard",
+        "start date",
+        "available to start",
+        "how soon",
+    ),
     "buyout": ("buyout", "buy out", "buy-out"),
     "experience": ("experience", "yrs", "years"),
-    "work_auth": ("authorized", "authorised", "work permit", "right to work",
-                  "eligible to work", "legally eligible", "sponsorship",
-                  "visa", "work authorization", "work authorisation"),
+    "work_auth": (
+        "authorized",
+        "authorised",
+        "work permit",
+        "right to work",
+        "eligible to work",
+        "legally eligible",
+        "sponsorship",
+        "visa",
+        "work authorization",
+        "work authorisation",
+    ),
     "relocate": ("relocate", "relocation", "willing to move"),
-    "location": ("location", "city", "reside", "residence", "based in",
-                 "hometown", "postal", "zip", "pin code"),
+    "location": (
+        "location",
+        "city",
+        "reside",
+        "residence",
+        "based in",
+        "hometown",
+        "postal",
+        "zip",
+        "pin code",
+    ),
     "phone": ("phone", "mobile", "contact number", "whatsapp"),
     "email": ("email", "e-mail"),
-    "education": ("degree", "graduat", "qualification", "education",
-                  "university", "college", "b.tech", "bachelor", "master"),
-    "language": ("english", "hindi", "language", "fluen", "proficien",
-                 "speak", "read and write"),
+    "education": (
+        "degree",
+        "graduat",
+        "qualification",
+        "education",
+        "university",
+        "college",
+        "b.tech",
+        "bachelor",
+        "master",
+    ),
+    "language": (
+        "english",
+        "hindi",
+        "language",
+        "fluen",
+        "proficien",
+        "speak",
+        "read and write",
+    ),
     "gender": ("gender",),
     "disability": ("disab", "differently abled"),
     "veteran": ("veteran", "military", "armed forces"),
     "ethnicity": ("race", "ethnic", "caste", "community"),
-    "non_compete": ("non-compete", "non compete", "noncompete",
-                    "restrictive covenant", "bond"),
-    "conflict": ("conflict of interest", "relative", "family member",
-                 "related to any"),
-    "background": ("background check", "background verification", "bgv",
-                   "reference check"),
+    "non_compete": (
+        "non-compete",
+        "non compete",
+        "noncompete",
+        "restrictive covenant",
+        "bond",
+    ),
+    "conflict": ("conflict of interest", "relative", "family member", "related to any"),
+    "background": (
+        "background check",
+        "background verification",
+        "bgv",
+        "reference check",
+    ),
     "criminal": ("convicted", "criminal", "felony", "arrested"),
-    "workplace": ("hybrid", "work from office", "work from home", "remote",
-                  "onsite", "on-site", "in office", "in-office", "commute",
-                  "days a week", "days per week"),
+    "workplace": (
+        "hybrid",
+        "work from office",
+        "work from home",
+        "remote",
+        "onsite",
+        "on-site",
+        "in office",
+        "in-office",
+        "commute",
+        "days a week",
+        "days per week",
+    ),
     "shift": ("shift", "night", "rotational", "weekend", "on-call", "on call"),
-    "source": ("referral", "referred", "how did you hear", "where did you hear",
-               "how you came to know"),
-    "links": ("linkedin profile", "linkedin url", "github", "portfolio",
-              "personal website"),
+    "source": (
+        "referral",
+        "referred",
+        "how did you hear",
+        "where did you hear",
+        "how you came to know",
+    ),
+    "links": (
+        "linkedin profile",
+        "linkedin url",
+        "github",
+        "portfolio",
+        "personal website",
+    ),
     "certification": ("certification", "certified", "certificate"),
-    "rating": ("rate your", "rate yourself", "proficiency in", "scale of",
-               "out of 10", "out of 5"),
+    "rating": (
+        "rate your",
+        "rate yourself",
+        "proficiency in",
+        "scale of",
+        "out of 10",
+        "out of 5",
+    ),
     "notice_serving": ("serving notice", "currently serving"),
-    "employer": ("current employer", "current company", "present employer",
-                 "organization you work"),
+    "employer": (
+        "current employer",
+        "current company",
+        "present employer",
+        "organization you work",
+    ),
     "title": ("current designation", "current title", "current role", "job title"),
     "offers": ("other offer", "offers in hand", "in hand offer", "interview process"),
     "age": ("date of birth", "age", "dob"),
@@ -73,26 +160,61 @@ TOPICS: dict[str, tuple[str, ...]] = {
 # kind of mistake that is invisible until an offer comes in low.
 AXES: dict[str, dict[str, tuple[str, ...]]] = {
     "when": {
-        "current": ("current", "present", "existing", "drawing", "last drawn",
-                    "presently", "today"),
-        "expected": ("expected", "desired", "expectation", "asking",
-                     "looking for", "would you like", "require"),
+        "current": (
+            "current",
+            "present",
+            "existing",
+            "drawing",
+            "last drawn",
+            "presently",
+            "today",
+        ),
+        "expected": (
+            "expected",
+            "desired",
+            "expectation",
+            "asking",
+            "looking for",
+            "would you like",
+            "require",
+        ),
     },
     "period": {
-        "monthly": ("month", "monthly", "per month", "in hand", "in-hand",
-                    "take home", "take-home"),
+        "monthly": (
+            "month",
+            "monthly",
+            "per month",
+            "in hand",
+            "in-hand",
+            "take home",
+            "take-home",
+        ),
         "annual": ("annual", "yearly", "per annum", "per year", "ctc", "lpa"),
     },
 }
 
 # Axes only matter where the distinction changes the answer.
-AXIS_TOPICS = {"when": {"salary", "employer", "title", "location"},
-               "period": {"salary"}}
+AXIS_TOPICS = {
+    "when": {"salary", "employer", "title", "location"},
+    "period": {"salary"},
+}
 
-NEGATIONS = ("not ", "n't", "unable", "unwilling", "never", " no longer",
-             "without ", "cannot", "can not", "don't", "do not")
+NEGATIONS = (
+    "not ",
+    "n't",
+    "unable",
+    "unwilling",
+    "never",
+    " no longer",
+    "without ",
+    "cannot",
+    "can not",
+    "don't",
+    "do not",
+)
 
-STOPWORDS = frozenset("""
+STOPWORDS = frozenset(
+    """
 a an the is are am do does did you your yours we our us i me my mine of in on
 at to for from with and or if any as be been being have has had will would
 can could shall should may might must this that these those it its please
@@ -100,7 +222,8 @@ provide enter specify tell about what which how many much long when where who
 whom whose why yes no per number value years year field required optional
 question answer applicant candidate role position job company kind confirm
 state mention give us select choose type write
-""".split())
+""".split()
+)
 
 
 def _clean(question: str) -> str:
@@ -183,10 +306,12 @@ def same_question(new: str, stored: str) -> str:
 
 
 YES_NO = frozenset(("yes", "no", "true", "false"))
-ASKS_YES_NO = frozenset("""
+ASKS_YES_NO = frozenset(
+    """
 do does did are is was were have has had can could will would shall should
 may might must
-""".split())
+""".split()
+)
 ASKS_VALUE = frozenset("what which how where when who".split())
 
 

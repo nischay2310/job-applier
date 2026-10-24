@@ -1,7 +1,7 @@
 # One-attempt install + launch for Job Applier on Windows.
 #
 # What it does, in order:
-#   1. Installs missing prerequisites via winget (Python 3.12, Git, Node.js, Google Chrome, uv)
+#   1. Installs missing prerequisites via winget (Python 3.12, Git, Node.js, Google Chrome, uv, Ollama)
 #   2. Installs Python + frontend dependencies
 #   3. Builds the dashboard UI and downloads the Playwright browser
 #   4. Creates your .env and data files from the provided examples
@@ -80,6 +80,17 @@ if (-not (Test-Path $ChromePath) -and -not (Test-Path $ChromePathX86)) {
 } else {
     Say "Google Chrome already installed."
 }
+
+# --- Ollama + a small local model (reads your resume privately) ---
+if (-not (Have "ollama")) {
+    Say "Ollama not found. Installing..."
+    winget install --id Ollama.Ollama -e --source winget --accept-source-agreements --accept-package-agreements
+    $env:PATH = "$env:PATH;$env:LOCALAPPDATA\Programs\Ollama"
+}
+Say "Downloading the resume-reading model (qwen2.5:3b, about 2 GB, first time only)..."
+Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+ollama pull qwen2.5:3b
 
 # --- Python dependencies ---
 Say "Installing Python dependencies (uv sync)..."

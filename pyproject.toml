@@ -23,6 +23,7 @@ dependencies = [
     "jinja2>=3.1.6",
     "python-multipart>=0.0.32",
     "playwright-stealth>=2.0.3",
+    "pypdf>=6.21.1",
 ]
 
 [project.optional-dependencies]
@@ -55,3 +56,9 @@ dev = [
     "pre-commit>=4.6.0",
     "ruff>=0.15.0",
 ]
+
+[tool.uv]
+# python-jobspy caps markdownify below 0.14, but 0.13.1 has a published
+# vulnerability (fixed in 0.14.1). jobspy only calls markdownify(html), which is
+# unchanged, so the cap is overridden.
+override-dependencies = ["markdownify>=0.14.1"]

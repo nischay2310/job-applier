@@ -32,5 +32,9 @@
   "custom_ai_instructions": "",
   "greenhouse_companies": [],
   "lever_companies": [],
-  "custom_answers": {}
+  "custom_answers": {},
+  "state": "",
+  "nationality": "",
+  "employment_status": "",
+  "english_level": ""
 }

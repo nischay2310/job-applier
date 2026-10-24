@@ -52,7 +52,12 @@ def find_chrome() -> str | None:
             if exe.exists():
                 return str(exe)
         return None
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+    for name in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ):
         found = shutil.which(name)
         if found:
             return found
@@ -73,15 +78,40 @@ def _stop_automation_chrome() -> None:
             f"Where-Object {{ $_.CommandLine -like '*{profile}*' }} | "
             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
         )
-        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script], capture_output=True
+        )
     else:
-        subprocess.run(["pkill", "-f", f"--user-data-dir={profile}"], capture_output=True)
+        subprocess.run(
+            ["pkill", "-f", f"--user-data-dir={profile}"], capture_output=True
+        )
     time.sleep(2)
 
 
 def _profile_in_use() -> bool:
     lock = PROFILE_DIR / ("lockfile" if IS_WINDOWS else "SingletonLock")
     return lock.exists() or lock.is_symlink()
+
+
+def turn_off_chrome_signin(profile_dir: Path | None = None) -> bool:
+    """Switches off "Allow Chrome sign-in" in the automation profile.
+
+    Signing in to a site with Google makes Chrome open its own "Sign in to
+    Chrome" page (chrome://signin-dice-web-intercept) instead of going back
+    to the site, and that page can also stop the automation from attaching.
+    Only touches the profile's own settings, and only while Chrome is closed.
+    """
+    prefs_file = (profile_dir or PROFILE_DIR) / "Default" / "Preferences"
+    try:
+        prefs = json.loads(prefs_file.read_text(encoding="utf-8"))
+        signin = prefs.setdefault("signin", {})
+        if signin.get("allowed") is False:
+            return False
+        signin["allowed"] = False
+        prefs_file.write_text(json.dumps(prefs), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def ensure_chrome() -> tuple[bool, str]:
@@ -97,10 +127,12 @@ def ensure_chrome() -> tuple[bool, str]:
         _stop_automation_chrome()
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    turn_off_chrome_signin()
     args = [
         chrome,
         f"--remote-debugging-port={CDP_PORT}",
         f"--user-data-dir={PROFILE_DIR}",
+        "--disable-sync",
         # Open the profile directly - with more than one profile in the
         # folder Chrome stops at its profile picker, which can't be driven.
         "--profile-directory=Default",
@@ -116,12 +148,18 @@ def ensure_chrome() -> tuple[bool, str]:
     if IS_WINDOWS:
         subprocess.Popen(
             ["cmd", "/c", "start", "", *args],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            close_fds=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            close_fds=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     else:
-        subprocess.Popen(args, start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            args,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     for _ in range(40):
         if cdp_ready():
@@ -134,7 +172,9 @@ def close_idle_windows(keep_target_ids: set[str]) -> int:
     """Closes automation Chrome tabs no running agent owns. One tab is always
     left open - closing the last one would quit Chrome."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3) as r:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3
+        ) as r:
             pages = [t for t in json.load(r) if t.get("type") == "page"]
     except Exception:
         return 0
@@ -144,7 +184,9 @@ def close_idle_windows(keep_target_ids: set[str]) -> int:
     closed = 0
     for t in idle:
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/close/{t['id']}", timeout=3)
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{CDP_PORT}/json/close/{t['id']}", timeout=3
+            )
             closed += 1
         except Exception:
             pass
@@ -170,6 +212,31 @@ def restart_chrome() -> tuple[bool, str]:
     """
     _stop_automation_chrome()
     return ensure_chrome()
+
+
+def open_page(url: str) -> bool:
+    """Opens a URL in a new tab of the automation Chrome and brings it forward."""
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{CDP_PORT}/json/new?{url}", method="PUT"
+        )
+        with urllib.request.urlopen(request, timeout=5) as r:
+            tab = json.load(r)
+        activate_target(tab["id"])
+        return True
+    except Exception:
+        return False
+
+
+def target_is_open(target_id: str) -> bool:
+    """True while Chrome still lists this tab or window."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3
+        ) as r:
+            return any(t.get("id") == target_id for t in json.load(r))
+    except Exception:
+        return False
 
 
 def close_target(target_id: str) -> bool:

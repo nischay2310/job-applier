@@ -28,7 +28,13 @@ from job_applier.automation.cloudflare import (  # type: ignore[import-not-found
 from job_applier.automation.question_store import (  # type: ignore[import-not-found]
     record_pending,
 )
-from job_applier.chrome_launcher import cdp_ready, close_target, ensure_chrome
+from job_applier.roles import title_matches_roles
+from job_applier.chrome_launcher import (
+    cdp_ready,
+    close_target,
+    ensure_chrome,
+    target_is_open,
+)
 from job_applier.automation.question_solver import (  # type: ignore[import-not-found]
     QuestionSolver,
 )
@@ -253,6 +259,18 @@ def agent_frame_path(agent_id: str) -> Path:
     return get_project_root() / "data" / "live" / f"{agent_id}.png"
 
 
+def job_passes_filters(
+    card_text: str, include: list[str] | None, exclude: list[str] | None
+) -> bool:
+    """Whether a job card's text passes the user's keyword filters: it must
+    mention at least one `include` word (if any are given) and none of the
+    `exclude` words."""
+    text = card_text.lower()
+    if include and not any(word.lower() in text for word in include):
+        return False
+    return not any(word.lower() in text for word in exclude or [])
+
+
 class BrowserAutomator:
     """Automates job application submission and form autofill using Playwright."""
 
@@ -375,7 +393,12 @@ class BrowserAutomator:
         with AGENTS_LOCK:
             agent = AGENTS.setdefault(
                 self.agent_id,
-                {"id": self.agent_id, "started_at": now, "step": "starting", "message": ""},
+                {
+                    "id": self.agent_id,
+                    "started_at": now,
+                    "step": "starting",
+                    "message": "",
+                },
             )
             agent.update(fields, target_id=self.target_id, updated_at=now)
 
@@ -400,7 +423,9 @@ class BrowserAutomator:
                 cookies = json.load(f)
             if cookies:
                 self.context.add_cookies(cookies)
-                print(f"Injected {len(cookies)} plaintext cookies into browser context.")
+                print(
+                    f"Injected {len(cookies)} plaintext cookies into browser context."
+                )
         except Exception as e:
             print(f"Notice: could not inject plaintext cookies: {e}")
 
@@ -420,7 +445,9 @@ class BrowserAutomator:
             self.context = self.browser.contexts[0]
             self.page = self._open_agent_window()
             self.using_host_chrome = True
-            print(f"Attached to automation Chrome over CDP ({HOST_CHROME_HOSTNAME}:{HOST_CHROME_CDP_PORT})")
+            print(
+                f"Attached to automation Chrome over CDP ({HOST_CHROME_HOSTNAME}:{HOST_CHROME_CDP_PORT})"
+            )
             return True
         except Exception as e:
             print(f"Notice: could not attach to desktop Chrome ({e}).")
@@ -558,11 +585,15 @@ class BrowserAutomator:
                 # running natively we can put it back instead of failing.
                 if not IN_DOCKER and not cdp_ready():
                     ok, msg = ensure_chrome()
-                    log_event(msg, level="INFO" if ok else "ERROR", category="Auto-Apply")
+                    log_event(
+                        msg, level="INFO" if ok else "ERROR", category="Auto-Apply"
+                    )
                 if self._connect_host_chrome():
                     self.page.set_default_navigation_timeout(30000)
                     self.page.set_default_timeout(10000)
-                    self._update_agent(step="starting", message="Opened its Chrome window")
+                    self._update_agent(
+                        step="starting", message="Opened its Chrome window"
+                    )
                     return
                 if not IN_DOCKER:
                     raise RuntimeError(
@@ -642,34 +673,114 @@ class BrowserAutomator:
             self.close()
             raise
 
+    def _new_tabs_since(self, pages_before: list[Any]) -> list[Any]:
+        """Tabs opened since pages_before - preferring ones this agent's own
+        page opened, since the automation Chrome is shared with other agents."""
+        fresh = [p for p in self.context.pages if p not in pages_before]
+        mine = []
+        for page in fresh:
+            try:
+                if page.opener() == self.page:
+                    mine.append(page)
+            except Exception:
+                continue
+        return mine or fresh
+
+    def _close_agent_window(self) -> None:
+        """Closes this agent's Chrome window with every tab in it, including
+        tabs an Apply click opened that we never tracked. Anything left
+        behind would sit there holding a logged-in page open for nothing."""
+        self._close_tabs_in_window()
+        for page in reversed(self._own_pages):
+            try:
+                page.close()
+            except Exception:
+                pass
+        self._own_pages = []
+        if self.target_id and target_is_open(self.target_id):
+            # A transient CDP hiccup is how a finished agent's window gets
+            # left open - one retry, then a log line so "Close Idle Windows"
+            # isn't the only way to find out.
+            if not close_target(self.target_id):
+                time.sleep(0.5)
+                if not close_target(self.target_id):
+                    log_event(
+                        f"Agent {self.agent_id} finished but its Chrome window "
+                        "didn't close - use 'Close Idle Windows' in the dashboard.",
+                        level="WARN",
+                        category="Auto-Apply",
+                    )
+
+    def _close_tabs_in_window(self) -> None:
+        """Closes every tab in this agent's window, plus any popup those tabs
+        opened (a popup can get a window of its own)."""
+        if not (self.browser and self.target_id):
+            return
+        try:
+            cdp = self.browser.new_browser_cdp_session()
+            window_id = cdp.send(
+                "Browser.getWindowForTarget", {"targetId": self.target_id}
+            )["windowId"]
+            tabs = [
+                info
+                for info in cdp.send("Target.getTargets")["targetInfos"]
+                if info["type"] == "page"
+            ]
+            ours = {self.target_id}
+            for info in tabs:
+                try:
+                    tab_window = cdp.send(
+                        "Browser.getWindowForTarget", {"targetId": info["targetId"]}
+                    )["windowId"]
+                except Exception:
+                    continue
+                if tab_window == window_id:
+                    ours.add(info["targetId"])
+            # Popups opened by our tabs, and popups opened by those.
+            grew = True
+            while grew:
+                grew = False
+                for info in tabs:
+                    if info.get("openerId") in ours and info["targetId"] not in ours:
+                        ours.add(info["targetId"])
+                        grew = True
+            for target_id in ours:
+                try:
+                    cdp.send("Target.closeTarget", {"targetId": target_id})
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def release_window(self) -> None:
+        """Closes the agent's window once a job is finished. The next job
+        opens a fresh one, so a long run doesn't leave one window per job
+        (or one forever) sitting open."""
+        if not self.using_host_chrome:
+            return
+        self._close_agent_window()
+        with AGENTS_LOCK:
+            AGENTS.pop(self.agent_id, None)
+        agent_frame_path(self.agent_id).unlink(missing_ok=True)
+        self.page = None
+        self.target_id = None
+
+    def _reopen_window(self) -> None:
+        """A new window after release_window(), or a first start."""
+        if self.using_host_chrome and self.context is not None:
+            self.page = self._open_agent_window()
+            self.page.set_default_navigation_timeout(30000)
+            self.page.set_default_timeout(10000)
+        else:
+            self.start()
+
     def close(self) -> None:
         """Closes browser and stops Playwright engine."""
         try:
             if self.using_host_chrome:
-                # Never tear down the automation Chrome itself - close the
-                # tabs this run opened (including any the Apply button spawned)
-                # and its window, then detach. Anything left behind would sit
-                # there holding a logged-in LinkedIn page open for nothing.
-                for page in reversed(self._own_pages):
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                self._own_pages = []
-                if self.target_id:
-                    # A transient CDP hiccup here is exactly how a finished
-                    # agent's window is left open with nothing to clean it
-                    # up - one retry, and a log line if it still fails, so
-                    # "Close Idle Windows" isn't the only way to find out.
-                    if not close_target(self.target_id):
-                        time.sleep(0.5)
-                        if not close_target(self.target_id):
-                            log_event(
-                                f"Agent {self.agent_id} finished but its Chrome window "
-                                "didn't close - use 'Close Idle Windows' in the dashboard.",
-                                level="WARN",
-                                category="Auto-Apply",
-                            )
+                # Never tear down the automation Chrome itself - only this
+                # agent's window, then detach.
+                self._close_agent_window()
                 if self.playwright:
                     self.playwright.stop()
                 return
@@ -717,7 +828,7 @@ class BrowserAutomator:
         Navigates to job URL and attempts to click 'Apply' / 'Apply now' if on an overview page.
         """
         if not self.page:
-            self.start()
+            self._reopen_window()
         self.last_apply_kind = None
         self.last_job_inactive = ""
         self.last_excluded = ""
@@ -766,7 +877,7 @@ class BrowserAutomator:
             pass
 
         # If it opened a new tab/popup upon clicking an apply button
-        initial_pages_count = len(self.context.pages)
+        pages_before = list(self.context.pages)
 
         # Check for common "Apply" / "Easy Apply" / "Apply on company website" buttons
         apply_selectors = [
@@ -842,8 +953,9 @@ class BrowserAutomator:
                             break
                     if clicked:
                         # Check if a new tab was opened
-                        if len(self.context.pages) > initial_pages_count:
-                            self.page = self.context.pages[-1]
+                        opened = self._new_tabs_since(pages_before)
+                        if opened:
+                            self.page = opened[-1]
                             self._own_pages.append(self.page)
                             self._install_kill_switch(self.page)
                             self.page.bring_to_front()
@@ -855,7 +967,9 @@ class BrowserAutomator:
         # Apply can hand off to a platform we don't handle - the job URL looked
         # fine, the destination doesn't.
         if is_excluded_application_url(self.page.url):
-            self.last_excluded = f"Application continues on {self.detect_platform(self.page.url)}"
+            self.last_excluded = (
+                f"Application continues on {self.detect_platform(self.page.url)}"
+            )
             self._notify("skipped", self.last_excluded, level="WARN")
             return False
 
@@ -868,8 +982,14 @@ class BrowserAutomator:
         if self.detect_platform(self.page.url) != "LinkedIn":
             return None
         checks = (
-            ("easy", "button.jobs-apply-button[aria-label*='Easy Apply'], button:has-text('Easy Apply')"),
-            ("external", "button.jobs-apply-button, a.jobs-apply-button, [aria-label*='company website']"),
+            (
+                "easy",
+                "button.jobs-apply-button[aria-label*='Easy Apply'], button:has-text('Easy Apply')",
+            ),
+            (
+                "external",
+                "button.jobs-apply-button, a.jobs-apply-button, [aria-label*='company website']",
+            ),
         )
         for kind, sel in checks:
             try:
@@ -928,6 +1048,17 @@ class BrowserAutomator:
 
         # Other ATS (Greenhouse, Lever, Workday) render full-page forms.
         return self.page
+
+    def _form_evaluate(self, script: str, arg: Any = None) -> Any:
+        """Runs `root => ...` (or `(root, arg) => ...`) in the page against the
+        form. A dialog is a locator and takes the script as it is; on a
+        full-page form the root is the page body, which Page.evaluate would
+        otherwise leave as null."""
+        root = self._form_root()
+        if root is self.page:
+            call = f"({script})(document.body, {json.dumps(arg)})"
+            return self.page.evaluate(call)
+        return root.evaluate(script) if arg is None else root.evaluate(script, arg)
 
     def _dismiss_overlays(self) -> None:
         """Dismisses modal overlays (LinkedIn sign-in prompts) and cookie banners."""
@@ -1094,6 +1225,7 @@ class BrowserAutomator:
         # 1. Locate CV PDF and Cover Letter. On LinkedIn, always use the
         # candidate's real named resume rather than the per-job generated
         # one - the generated CV is only a tailoring fallback.
+        cv_pdf: Path | None
         own_resume = candidate_resume_path()
         if platform == "LinkedIn" and own_resume:
             cv_pdf = own_resume
@@ -1153,7 +1285,11 @@ class BrowserAutomator:
                             time.sleep(3)
                             self._fill_standard_inputs(report, cover_letter_text)
                             self._fill_select_inputs(report, job_title, company)
-                            if not report["resume_uploaded"] and cv_pdf and cv_pdf.exists():
+                            if (
+                                not report["resume_uploaded"]
+                                and cv_pdf
+                                and cv_pdf.exists()
+                            ):
                                 report["resume_uploaded"] = self._upload_resume(
                                     str(cv_pdf.resolve())
                                 )
@@ -1262,7 +1398,9 @@ class BrowserAutomator:
                 )
 
                 def has(*words: str) -> bool:
-                    return any(re.search(rf"\b{re.escape(w)}\b", descriptor) for w in words)
+                    return any(
+                        re.search(rf"\b{re.escape(w)}\b", descriptor) for w in words
+                    )
 
                 # These rules are for short profile fields. A real question
                 # ("Please note our salary package...") goes to the question
@@ -1272,8 +1410,14 @@ class BrowserAutomator:
                 if "?" in label or len(label.split()) > 6:
                     continue
 
-                is_cover = has("cover letter", "coverletter", "motivation letter",
-                               "additional information", "additional info", "comments")
+                is_cover = has(
+                    "cover letter",
+                    "coverletter",
+                    "motivation letter",
+                    "additional information",
+                    "additional info",
+                    "comments",
+                )
                 current_val = el.input_value() or ""
                 if len(current_val) > 2 and not is_cover:
                     # Typed-but-never-picked typeahead text still fails validation.
@@ -1291,8 +1435,18 @@ class BrowserAutomator:
                 elif has("last name", "lastname", "family name", "surname"):
                     val, field_name = self.profile.last_name, "Last Name"
                 elif has("full name", "fullname", "your name") or (
-                    has("name") and not has("company", "user", "username", "file",
-                                            "org", "organization", "school", "manager", "reference")
+                    has("name")
+                    and not has(
+                        "company",
+                        "user",
+                        "username",
+                        "file",
+                        "org",
+                        "organization",
+                        "school",
+                        "manager",
+                        "reference",
+                    )
                 ):
                     val, field_name = self.profile.full_name, "Full Name"
                 elif has("email", "e mail"):
@@ -1304,7 +1458,10 @@ class BrowserAutomator:
                 elif has("github"):
                     val, field_name = self.profile.github_url, "GitHub"
                 elif has("website", "portfolio", "blog"):
-                    val, field_name = self.profile.portfolio_url or self.profile.github_url, "Portfolio / Website"
+                    val, field_name = (
+                        self.profile.portfolio_url or self.profile.github_url,
+                        "Portfolio / Website",
+                    )
                 elif has("city", "town", "location"):
                     val, field_name = self.profile.city, "City"
                 elif has("address", "street"):
@@ -1352,7 +1509,9 @@ class BrowserAutomator:
                 if selected in choices:
                     continue  # already answered (LinkedIn prefills some)
 
-                question = self._get_question_label(el) or self._get_element_descriptor(el)
+                question = self._get_question_label(el) or self._get_element_descriptor(
+                    el
+                )
                 answer = self.question_solver.answer_question(
                     question, options=choices, job_title=job_title, company=company
                 )
@@ -1426,9 +1585,7 @@ class BrowserAutomator:
                             required=self._is_required(el),
                             kind=self._field_kind(el),
                         )
-                        report.setdefault("needs_review", []).append(
-                            clean_label[:120]
-                        )
+                        report.setdefault("needs_review", []).append(clean_label[:120])
                         self._highlight_element(el, color="#ff9800")
 
             except Exception:
@@ -1438,7 +1595,7 @@ class BrowserAutomator:
         """Reads every radio-button question on the current step as
         {question, required, options:[{value,label}], name}."""
         try:
-            return self._form_root().evaluate("""root => {
+            return self._form_evaluate("""root => {
                 const radios = Array.from(root.querySelectorAll("input[type=radio]"));
                 const groups = {};
                 for (const r of radios) {
@@ -1452,7 +1609,10 @@ class BrowserAutomator:
                         const fs = r.closest('fieldset');
                         const text = el => (el && el.innerText ? el.innerText.trim() : '');
                         const byId = id => text(id ? document.getElementById(id) : null);
-                        const group = r.closest("[role=radiogroup], [data-test-form-builder-radio-button-form-component], fieldset");
+                        // Plain forms have no fieldset or radiogroup: the box
+                        // around the options is the group.
+                        const group = r.closest("[role=radiogroup], [data-test-form-builder-radio-button-form-component], fieldset")
+                            || (r.parentElement && r.parentElement.parentElement);
                         // What the options say, so option text is never
                         // mistaken for the question - that turned real
                         // screeners into "Male Female I prefer not to specify".
@@ -1508,10 +1668,21 @@ class BrowserAutomator:
                             answered: false,
                         };
                     }
-                    const lbl = (r.labels && r.labels[0]) ? r.labels[0].innerText.trim() : '';
+                    // The option's text: its <label>, else whatever is written
+                    // next to it. A radio with no value attribute reports "on",
+                    // which is never the option's name.
+                    const own = el => (el && el.innerText ? el.innerText.trim() : '');
+                    let lbl = (r.labels && r.labels[0]) ? own(r.labels[0]) : '';
+                    if (!lbl) lbl = r.getAttribute('aria-label') || '';
+                    if (!lbl) lbl = own(r.nextElementSibling);
+                    if (!lbl && r.parentElement) {
+                        const around = own(r.parentElement);
+                        if (around.length <= 40) lbl = around;
+                    }
+                    if (!lbl && r.value && r.value !== 'on') lbl = r.value;
                     groups[name].options.push({
                         value: r.value || lbl,
-                        label: lbl || r.value || '',
+                        label: lbl,
                     });
                     if (r.checked) groups[name].answered = true;
                 }
@@ -1558,13 +1729,38 @@ class BrowserAutomator:
                 )
                 answer_lower = answer.lower()
                 answer_pattern = rf"\b{re.escape(answer_lower)}\b"
+                # The option the solver picked, by its position in the group:
+                # the radios come back in the same order as their labels.
+                labels = [
+                    (o.get("label") or "").strip().lower() for o in group["options"]
+                ]
+                chosen = next(
+                    (i for i, text in enumerate(labels) if text == answer_lower), None
+                )
+                if chosen is None:
+                    chosen = next(
+                        (
+                            i
+                            for i, text in enumerate(labels)
+                            if re.search(answer_pattern, text)
+                        ),
+                        None,
+                    )
                 for i in range(radios.count()):
                     radio = radios.nth(i)
                     label = self._get_element_descriptor(radio)
                     value = (radio.get_attribute("value") or "").lower()
                     # Word-boundary match: "no" must not match inside "not sure".
-                    if re.search(answer_pattern, label) or answer_lower == value:
-                        radio.check()
+                    picked = (
+                        i == chosen
+                        if chosen is not None
+                        else re.search(answer_pattern, label) or answer_lower == value
+                    )
+                    if picked:
+                        try:
+                            radio.check()
+                        except Exception:
+                            radio.check(force=True)  # custom-styled, hidden input
                         report["questions_answered"].append(
                             {"question": question[:50], "answer": answer}
                         )
@@ -1616,14 +1812,16 @@ class BrowserAutomator:
         """A site's search box is not an application question - it only gets
         in the way on ATS pages, which have no form popup to scope to."""
         try:
-            return bool(el.evaluate("""el => {
+            return bool(
+                el.evaluate("""el => {
                 const type = (el.getAttribute('type') || '').toLowerCase();
                 const role = (el.getAttribute('role') || '').toLowerCase();
                 const text = ((el.labels && el.labels[0] ? el.labels[0].innerText : '') + ' '
                     + (el.getAttribute('aria-label') || '') + ' ' + (el.placeholder || '')
                     + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
                 return type === 'search' || role === 'searchbox' || /\\bsearch\\b/.test(text);
-            }"""))
+            }""")
+            )
         except Exception:
             return False
 
@@ -1669,7 +1867,9 @@ class BrowserAutomator:
         value than an empty required field.
         """
         try:
-            if el.get_attribute("role") != "combobox" and not el.get_attribute("aria-autocomplete"):
+            if el.get_attribute("role") != "combobox" and not el.get_attribute(
+                "aria-autocomplete"
+            ):
                 return
         except Exception:
             return
@@ -2071,7 +2271,7 @@ class BrowserAutomator:
         (Yes/No) instead of a free-text box."""
         try:
             return (
-                self._form_root().evaluate(
+                self._form_evaluate(
                     """(root, label) => {
                 const norm = s => (s || '').replace(/\\*/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
                 const target = norm(label);
@@ -2103,7 +2303,7 @@ class BrowserAutomator:
         concrete reason a wizard refuses to advance or submit."""
         try:
             return (
-                self._form_root().evaluate("""root => {
+                self._form_evaluate("""root => {
                 const out = [];
                 const els = root.querySelectorAll(
                     "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]), textarea, select"
@@ -2176,12 +2376,15 @@ class BrowserAutomator:
         """The step's field labels and headings - they change when the step
         does, but not when an error message appears on a rejected Next."""
         try:
-            return self._form_root().evaluate(
-                "root => Array.from(root.querySelectorAll('label, legend, h3'))"
-                ".map(e => e.innerText.trim()).join('|') + '#' + Array.from("
-                "root.querySelectorAll('progress, [aria-valuenow]'))"
-                ".map(e => e.value || e.getAttribute('aria-valuenow')).join(',')"
-            ) or ""
+            return (
+                self._form_evaluate(
+                    "root => Array.from(root.querySelectorAll('label, legend, h3'))"
+                    ".map(e => e.innerText.trim()).join('|') + '#' + Array.from("
+                    "root.querySelectorAll('progress, [aria-valuenow]'))"
+                    ".map(e => e.value || e.getAttribute('aria-valuenow')).join(',')"
+                )
+                or ""
+            )
         except Exception:
             return ""
 
@@ -2478,8 +2681,31 @@ class BrowserAutomator:
     # it doesn't use a form, just a button per job card.
     INSTAHYRE_APPLY_WORDS = ("apply", "i'm interested", "im interested", "interested")
     INSTAHYRE_DONE_WORDS = ("applied", "not interested", "withdrawn", "declined")
+    # A card that offers both "Interested" and "Not interested" is still open,
+    # so only these mean the whole card was already answered.
+    INSTAHYRE_CARD_DONE_WORDS = ("applied", "withdrawn", "declined")
 
-    def run_instahyre_scan_and_apply(self, max_jobs: int = 30) -> dict[str, Any]:
+    @staticmethod
+    def _instahyre_is_apply_text(text: str) -> bool:
+        """True for a button label that applies ("Apply", "I'm interested")
+        and not for one that closes the job ("Applied", "Not interested")."""
+        text = text.strip().lower()
+        if not text:
+            return False
+        # The page also has a bulk "Apply to 5 jobs" button; that isn't a job.
+        if re.search(r"apply to \d+ jobs?", text):
+            return False
+        if any(w in text for w in BrowserAutomator.INSTAHYRE_DONE_WORDS):
+            return False
+        return any(w in text for w in BrowserAutomator.INSTAHYRE_APPLY_WORDS)
+
+    def run_instahyre_scan_and_apply(
+        self,
+        max_jobs: int = 30,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        roles: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Scans Instahyre's candidate opportunities feed and clicks Apply on
         every job that still offers it, skipping ones already responded to.
 
@@ -2490,14 +2716,16 @@ class BrowserAutomator:
         if not self.page:
             self.start()
 
-        report: dict[str, Any] = {"scanned": 0, "applied": 0, "skipped": 0, "jobs": []}
+        report = self._instahyre_empty_report()
         self._notify("navigating", "Opening Instahyre opportunities feed...")
 
         try:
             self.page.goto("https://www.instahyre.com/", wait_until="domcontentloaded")
             time.sleep(2)
         except Exception as e:
-            self._notify("submission_failed", f"Could not open Instahyre: {e}", level="ERROR")
+            self._notify(
+                "submission_failed", f"Could not open Instahyre: {e}", level="ERROR"
+            )
             return report
 
         self._dismiss_overlays()
@@ -2521,7 +2749,7 @@ class BrowserAutomator:
             self._notify(
                 "login_required",
                 "Could not reach the Instahyre opportunities feed - log in first with "
-                "'just login instahyre'.",
+                "'Open Instahyre Login' in Logins & Auth.",
                 level="ERROR",
             )
             return report
@@ -2531,22 +2759,87 @@ class BrowserAutomator:
         except Exception:
             pass
 
+        return self._instahyre_apply_on_feed(max_jobs, include, exclude, roles)
+
+    @staticmethod
+    def _instahyre_empty_report() -> dict[str, Any]:
+        return {"scanned": 0, "applied": 0, "skipped": 0, "jobs": []}
+
+    def _instahyre_apply_on_feed(
+        self,
+        max_jobs: int,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        roles: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Clicks Apply on every open job card of the feed that is already
+        on screen and passes the keyword filters, up to max_jobs applications.
+
+        With `roles` given, only jobs whose title matches one of them are
+        applied to; the others are reported as "needs_decision" so the
+        candidate can choose. Without it, every card that passes is applied."""
+        report = self._instahyre_empty_report()
         cards = self._instahyre_job_cards()
         report["scanned"] = len(cards)
         self._notify(
             "form_detection", f"Found {len(cards)} job card(s) on the Instahyre feed."
         )
+        if not cards:
+            page_text = self.page.inner_text("body").lower()
+            if "no matching opportunities" in page_text:
+                self._notify(
+                    "feed_empty",
+                    "You're logged in, but Instahyre has no new matching jobs "
+                    "for you right now. Try again later.",
+                )
+            else:
+                self._notify(
+                    "login_required",
+                    "No jobs on the Instahyre feed. If you aren't logged in, "
+                    "use 'Open Instahyre Login' in Logins & Auth first.",
+                    level="WARN",
+                )
+            return report
 
-        for idx, card in enumerate(cards[:max_jobs]):
+        for idx, card in enumerate(cards):
+            if report["applied"] >= max_jobs:
+                break
             try:
                 card_text = (card.inner_text() or "").strip()
             except Exception:
                 card_text = ""
-            title_line = card_text.splitlines()[0] if card_text else f"Job {idx + 1}"
+            title_line, company = self._instahyre_card_title_and_company(
+                card, card_text
+            )
+            title_line = title_line or f"Job {idx + 1}"
+
+            if not job_passes_filters(card_text, include, exclude):
+                report["skipped"] += 1
+                report["jobs"].append(
+                    {
+                        "title": title_line,
+                        "company": company,
+                        "status": "skipped",
+                        "reason": "filtered out",
+                    }
+                )
+                continue
 
             button = self._instahyre_apply_button(card)
             if button is None:
                 report["skipped"] += 1
+                continue
+
+            if roles is not None and not title_matches_roles(title_line, roles):
+                report["skipped"] += 1
+                report["jobs"].append(
+                    {
+                        "title": title_line,
+                        "company": company,
+                        "status": "needs_decision",
+                        "reason": "doesn't match your roles",
+                    }
+                )
                 continue
 
             try:
@@ -2555,7 +2848,9 @@ class BrowserAutomator:
                 button.click(timeout=5000)
                 time.sleep(1.5)
                 report["applied"] += 1
-                report["jobs"].append({"title": title_line, "status": "applied"})
+                report["jobs"].append(
+                    {"title": title_line, "company": company, "status": "applied"}
+                )
                 self._notify(
                     "submitted",
                     f"Applied on Instahyre: {title_line}",
@@ -2564,7 +2859,12 @@ class BrowserAutomator:
             except Exception as e:
                 report["skipped"] += 1
                 report["jobs"].append(
-                    {"title": title_line, "status": "skipped", "reason": str(e)}
+                    {
+                        "title": title_line,
+                        "company": company,
+                        "status": "skipped",
+                        "reason": str(e),
+                    }
                 )
 
         self._notify(
@@ -2575,6 +2875,40 @@ class BrowserAutomator:
         )
         return report
 
+    @staticmethod
+    def _instahyre_card_title_and_company(card: Any, card_text: str) -> tuple[str, str]:
+        """The job title and company of a feed card: from its heading and
+        company elements when it has them, else from the first lines of text."""
+
+        def first_text(selector: str) -> str:
+            try:
+                text = card.locator(selector).first.inner_text(timeout=500)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                return lines[0] if lines else ""
+            except Exception:
+                return ""
+
+        lines = [line.strip() for line in card_text.splitlines() if line.strip()]
+        title = (
+            first_text("h1, h2, h3, h4")
+            or first_text("[class*='designation' i], [class*='title' i]")
+            or (lines[0] if lines else "")
+        )
+        company = first_text("[class*='company' i], [class*='employer' i]")
+        if not company:
+            # Button labels ("Apply", "Not interested") are not the company.
+            others = [
+                line
+                for line in lines
+                if line != title
+                and not BrowserAutomator._instahyre_is_apply_text(line)
+                and not any(
+                    w in line.lower() for w in BrowserAutomator.INSTAHYRE_DONE_WORDS
+                )
+            ]
+            company = others[0] if others else ""
+        return title, company
+
     def _instahyre_job_cards(self) -> list[Any]:
         """Each job listing on the feed, as a locator scoped to that card.
 
@@ -2584,31 +2918,28 @@ class BrowserAutomator:
         their next frontend deploy.
         """
         try:
-            buttons = self.page.locator(
-                "button, a[role=button], [class*='btn' i]"
-            )
+            buttons = self.page.locator("button, a[role=button], [class*='btn' i]")
             count = min(buttons.count(), 200)
             cards: list[Any] = []
-            seen_card_ids: set[int] = set()
+            seen_cards: set[str] = set()
             for i in range(count):
                 btn = buttons.nth(i)
                 try:
+                    if not btn.is_visible():
+                        continue
                     text = (btn.inner_text() or "").strip().lower()
                 except Exception:
                     continue
-                if not any(w in text for w in self.INSTAHYRE_APPLY_WORDS):
+                if not self._instahyre_is_apply_text(text):
                     continue
                 try:
-                    card = btn.locator(
-                        "xpath=ancestor::*[self::div or self::li][1]"
-                    )
-                    handle = card.element_handle()
-                    if handle is None:
+                    card = btn.locator("xpath=ancestor::*[self::div or self::li][1]")
+                    # Two buttons in one card give the same text, so this
+                    # keeps each job to a single entry.
+                    card_key = (card.inner_text() or "").strip()
+                    if not card_key or card_key in seen_cards:
                         continue
-                    card_id = id(handle)
-                    if card_id in seen_card_ids:
-                        continue
-                    seen_card_ids.add(card_id)
+                    seen_cards.add(card_key)
                     cards.append(card)
                 except Exception:
                     continue
@@ -2623,7 +2954,7 @@ class BrowserAutomator:
             card_text = (card.inner_text() or "").lower()
         except Exception:
             return None
-        if any(w in card_text for w in self.INSTAHYRE_DONE_WORDS):
+        if any(w in card_text for w in self.INSTAHYRE_CARD_DONE_WORDS):
             return None
 
         try:
@@ -2634,9 +2965,7 @@ class BrowserAutomator:
                     text = (el.inner_text() or "").strip().lower()
                 except Exception:
                     continue
-                if not text or not any(w in text for w in self.INSTAHYRE_APPLY_WORDS):
-                    continue
-                if any(w in text for w in self.INSTAHYRE_DONE_WORDS):
+                if not self._instahyre_is_apply_text(text):
                     continue
                 try:
                     if el.is_disabled():
