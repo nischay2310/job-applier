@@ -178,7 +178,9 @@ def merge_sqlite_cookies(src_db: Path, dest_db: Path) -> int:
         return 0
     dest_db.parent.mkdir(parents=True, exist_ok=True)
 
-    tmp_src = Path(f"/tmp/src_merge_{os.getpid()}_{src_db.parent.name}.db")
+    handle, tmp_name = tempfile.mkstemp(prefix="src_merge_", suffix=".db")
+    os.close(handle)
+    tmp_src = Path(tmp_name)
     count = 0
     try:
         shutil.copyfile(src_db, tmp_src)
